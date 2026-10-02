@@ -1,0 +1,182 @@
+import express, { type NextFunction, type Request, type Response } from 'express';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { z } from 'zod';
+import { config } from '../config.js';
+import * as repo from '../db/repo.js';
+import { refreshFeed } from '../ingest/ingest.js';
+import { runIngestion } from '../ingest/scheduler.js';
+import { mcpHttpHandler } from '../mcp/http.js';
+
+const id = z.coerce.number().int().positive();
+const status = z.enum(['read', 'unread', 'all']);
+
+const listQuery = z.object({
+  feed_id: id.optional(),
+  board_id: id.optional(),
+  status: status.default('all'),
+  saved: z
+    .enum(['true', 'false'])
+    .transform((v) => v === 'true')
+    .optional(),
+  content: z
+    .enum(['true', 'false'])
+    .transform((v) => v === 'true')
+    .optional(),
+  q: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+const subscribeBody = z.object({ url: z.url(), board_id: id.nullable().optional() });
+const feedPatch = z.object({ board_id: id.nullable() });
+const boardBody = z.object({ name: z.string().trim().min(1).max(100) });
+const itemPatch = z.object({
+  is_read: z.boolean().optional(),
+  is_saved: z.boolean().optional(),
+  board_id: id.nullable().optional(),
+});
+const markReadBody = z.union([
+  z.object({ item_ids: z.array(z.string()).min(1), is_read: z.boolean().default(true) }),
+  z.object({ feed_id: id.optional(), board_id: id.optional(), all: z.literal(true).optional() }),
+]);
+
+function requireToken(req: Request, res: Response, next: NextFunction) {
+  if (!config.apiToken) return next();
+  if (req.headers.authorization === `Bearer ${config.apiToken}`) return next();
+  res.status(401).json({ error: 'Unauthorized' });
+}
+
+export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
+  const userId = opts.userId ?? config.userId;
+  const app = express();
+  app.disable('x-powered-by');
+  app.use(express.json({ limit: '1mb' }));
+
+  app.get('/healthz', (_req, res) => {
+    res.json({ ok: true });
+  });
+
+  const api = express.Router();
+  api.use(requireToken);
+
+  // ------------------------------------------------------------ boards
+  api.get('/boards', async (_req, res) => {
+    res.json(await repo.listBoards(userId));
+  });
+  api.post('/boards', async (req, res) => {
+    const { name } = boardBody.parse(req.body);
+    res.status(201).json(await repo.createBoard(userId, name));
+  });
+  api.delete('/boards/:id', async (req, res) => {
+    await repo.deleteBoard(userId, id.parse(req.params.id));
+    res.status(204).end();
+  });
+
+  // ------------------------------------------------------------ feeds
+  api.get('/feeds', async (_req, res) => {
+    res.json(await repo.listFeeds(userId));
+  });
+  api.post('/feeds', async (req, res) => {
+    const body = subscribeBody.parse(req.body);
+    const feedId = await repo.subscribe(userId, body.url, body.board_id ?? null);
+    const result = await refreshFeed(feedId);
+    res.status(201).json({ ...(await repo.getFeed(userId, feedId)), refresh: result });
+  });
+  api.patch('/feeds/:id', async (req, res) => {
+    const feedId = id.parse(req.params.id);
+    await repo.setFeedBoard(userId, feedId, feedPatch.parse(req.body).board_id);
+    res.json(await repo.getFeed(userId, feedId));
+  });
+  api.delete('/feeds/:id', async (req, res) => {
+    await repo.unsubscribe(userId, id.parse(req.params.id));
+    res.status(204).end();
+  });
+  api.post('/feeds/:id/refresh', async (req, res) => {
+    const feedId = id.parse(req.params.id);
+    await repo.getFeed(userId, feedId);
+    res.json(await refreshFeed(feedId));
+  });
+  api.post('/refresh', async (_req, res) => {
+    void runIngestion();
+    res.status(202).json({ started: true });
+  });
+
+  // ------------------------------------------------------------ items
+  api.get('/items', async (req, res) => {
+    const q = listQuery.parse(req.query);
+    if (q.q?.trim()) {
+      const board = q.board_id
+        ? (await repo.listBoards(userId)).find((b) => b.id === q.board_id)
+        : undefined;
+      res.json(
+        await repo.searchItems(userId, {
+          keyword: q.q,
+          status: q.status,
+          savedOnly: q.saved,
+          boardSlug: board?.slug,
+          feedId: q.feed_id,
+          limit: Math.min(q.limit, 50),
+        }),
+      );
+      return;
+    }
+    res.json(
+      await repo.listItems(userId, {
+        feedId: q.feed_id,
+        boardId: q.board_id,
+        status: q.status,
+        saved: q.saved,
+        includeContent: q.content,
+        limit: q.limit,
+        offset: q.offset,
+      }),
+    );
+  });
+  api.get('/items/:id', async (req, res) => {
+    res.json(await repo.getItem(userId, req.params.id));
+  });
+  api.patch('/items/:id', async (req, res) => {
+    res.json(await repo.updateItemState(userId, req.params.id, itemPatch.parse(req.body)));
+  });
+  api.post('/items/mark-read', async (req, res) => {
+    const body = markReadBody.parse(req.body);
+    if ('item_ids' in body) {
+      const ids = await repo.markItemsRead(userId, body.item_ids, body.is_read);
+      res.json({ updated: ids.length, item_ids: ids });
+      return;
+    }
+    const updated = await repo.markAllRead(userId, { feedId: body.feed_id, boardId: body.board_id });
+    res.json({ updated });
+  });
+
+  app.use('/api', api);
+
+  // Streamable HTTP MCP endpoint, so remote/HTTP MCP clients can share the API's port.
+  app.all('/mcp', requireToken, mcpHttpHandler(userId));
+
+  // Serve the built web app when it is available.
+  const webDistOption = opts.webDistDir ?? config.webDistDir;
+  const webDist = webDistOption ? path.resolve(webDistOption) : undefined;
+  if (webDist && existsSync(path.join(webDist, 'index.html'))) {
+    app.use(express.static(webDist, { index: false, maxAge: '1h' }));
+    app.get(/^(?!\/api\/|\/mcp).*/, (_req, res) => {
+      res.sendFile(path.join(webDist, 'index.html'));
+    });
+  }
+
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (err instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request', issues: err.issues });
+    } else if (err instanceof repo.NotFoundError) {
+      res.status(404).json({ error: err.message });
+    } else if (err instanceof TypeError && /Invalid URL/i.test(err.message)) {
+      res.status(400).json({ error: 'Invalid URL' });
+    } else {
+      console.error(err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  return app;
+}

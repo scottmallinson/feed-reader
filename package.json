@@ -1,0 +1,17 @@
+{
+  "name": "feed-reader",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Self-hosted RSS/Atom feed reader with an MCP server for AI assistants",
+  "workspaces": ["server", "web"],
+  "scripts": {
+    "build": "npm run build -w server && npm run build -w web",
+    "dev:api": "npm run dev:api -w server",
+    "dev:web": "npm run dev -w web",
+    "migrate": "npm run migrate -w server",
+    "mcp": "npm run mcp -w server",
+    "test": "npm test -w server && npm test -w web",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
+  },
+  "engines": { "node": ">=20" }
+}

@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: feeds
+      POSTGRES_PASSWORD: feeds
+      POSTGRES_DB: feeds
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feeds"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Web UI + REST API + ingestion scheduler + MCP over Streamable HTTP (/mcp).
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://feeds:feeds@db:5432/feeds
+      FETCH_CRON: ${FETCH_CRON:-*/15 * * * *}
+      API_TOKEN: ${API_TOKEN:-}
+    ports:
+      - "${PORT:-3000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Optional: expose Postgres to the host so a locally-run stdio MCP server can reach it.
+  # Start with: docker compose --profile dev up
+  db-port:
+    profiles: [dev]
+    image: alpine/socat
+    command: tcp-listen:5432,fork,reuseaddr tcp-connect:db:5432
+    ports:
+      - "127.0.0.1:5432:5432"
+    depends_on: [db]
+
+volumes:
+  pgdata:
