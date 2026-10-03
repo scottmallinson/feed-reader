@@ -4,6 +4,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { config } from '../config.js';
 import * as repo from '../db/repo.js';
+import { NoFeedFoundError, resolveFeedUrl } from '../ingest/discover.js';
 import { refreshFeed } from '../ingest/ingest.js';
 import { runIngestion } from '../ingest/scheduler.js';
 import { mcpHttpHandler } from '../mcp/http.js';
@@ -103,7 +104,9 @@ export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
   });
   api.post('/feeds', async (req, res) => {
     const body = subscribeBody.parse(req.body);
-    const feedId = await repo.subscribe(userId, body.url, body.board_id ?? null);
+    // Accept a site's address as well as its feed URL.
+    const feedUrl = await resolveFeedUrl(body.url);
+    const feedId = await repo.subscribe(userId, feedUrl, body.board_id ?? null);
     const result = await refreshFeed(feedId);
     res.status(201).json({ ...(await repo.getFeed(userId, feedId)), refresh: result });
   });
@@ -192,6 +195,8 @@ export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof z.ZodError) {
       res.status(400).json({ error: 'Invalid request', issues: err.issues });
+    } else if (err instanceof NoFeedFoundError) {
+      res.status(422).json({ error: err.message });
     } else if (err instanceof repo.NotFoundError) {
       res.status(404).json({ error: err.message });
     } else if (err instanceof TypeError && /Invalid URL/i.test(err.message)) {

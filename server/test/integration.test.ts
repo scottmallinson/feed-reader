@@ -72,6 +72,46 @@ describe('ingestion', () => {
   });
 });
 
+describe('feed autodiscovery', () => {
+  it('subscribes to the feed a web page advertises', async () => {
+    const res = await request(app).post('/api/feeds').send({ url: `${fixtures.base}/site/` }).expect(201);
+    expect(res.body).toMatchObject({ url: `${fixtures.base}/site/feed.xml`, title: 'Site Posts' });
+    expect(res.body.refresh).toMatchObject({ inserted: 2 });
+    await repo.unsubscribe(USER, res.body.id);
+  });
+
+  it('falls back to common feed paths', async () => {
+    const res = await request(app).post('/api/feeds').send({ url: `${fixtures.base}/nofeed` }).expect(201);
+    expect(res.body).toMatchObject({ url: `${fixtures.base}/feed`, title: 'Root Feed' });
+    await repo.unsubscribe(USER, res.body.id);
+  });
+
+  it('rejects a readable web page with no feed (422) without subscribing', async () => {
+    const http = await import('node:http');
+    const server = http.createServer((req, res) => {
+      if (req.url === '/') res.writeHead(200, { 'content-type': 'text/html' }).end('<html><body>hi</body></html>');
+      else res.writeHead(404).end();
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const before = (await repo.listFeeds(USER)).length;
+      const res = await request(app).post('/api/feeds').send({ url: `http://127.0.0.1:${port}/` }).expect(422);
+      expect(res.body.error).toMatch(/No RSS or Atom feed found/);
+      expect(await repo.listFeeds(USER)).toHaveLength(before);
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  it('switches an existing web-page subscription to its feed on refresh', async () => {
+    const feedId = await repo.subscribe(USER, `${fixtures.base}/site/`);
+    expect(await refreshFeed(feedId)).toMatchObject({ inserted: 2 });
+    expect(await repo.getFeedUrl(feedId)).toBe(`${fixtures.base}/site/feed.xml`);
+    await repo.unsubscribe(USER, feedId);
+  });
+});
+
 describe('REST API', () => {
   it('manages boards and files feeds under them', async () => {
     const created = await request(app).post('/api/boards').send({ name: 'AI Research' }).expect(201);
@@ -112,6 +152,13 @@ describe('REST API', () => {
     const board = await request(app).get(`/api/items?board_id=${boardId}`).expect(200);
     expect(board.body).toHaveLength(3);
     await request(app).patch(`/api/items/${pi.id}`).send({ board_id: null }).expect(200);
+  });
+
+  it('still subscribes to an unreachable address, recording the fetch error', async () => {
+    const res = await request(app).post('/api/feeds').send({ url: 'http://127.0.0.1:1/nothing' });
+    expect(res.status).toBe(201);
+    expect(res.body.refresh.error).toBeTruthy();
+    await repo.unsubscribe(USER, res.body.id);
   });
 
   it('validates input and reports missing records', async () => {

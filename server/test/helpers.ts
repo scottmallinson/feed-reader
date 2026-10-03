@@ -27,6 +27,22 @@ export async function startFixtureServer() {
       '/r/LocalAI/.rss': ['localai.xml', 'application/atom+xml'],
       '/article/pi': ['article.html', 'text/html'],
     };
+    // Inline web pages for feed autodiscovery.
+    const pages: Record<string, string> = {
+      '/site/': `<!doctype html><html><head><title>Site</title>
+        <link rel="alternate" type="application/rss+xml" title="Comments" href="/site/comments.xml">
+        <link rel="alternate" type="application/rss+xml" title="Posts" href="feed.xml">
+        </head><body>Home</body></html>`,
+      '/nofeed': '<!doctype html><html><head><title>Nothing</title></head><body>No feed here</body></html>',
+    };
+    if (req.url && pages[req.url]) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(pages[req.url]);
+      return;
+    }
+    if (req.url === '/site/feed.xml' || req.url === '/feed') {
+      res.writeHead(200, { 'content-type': 'application/rss+xml' }).end(render('arxiv.xml').replace('cs.CL updates on arXiv.org', req.url === '/feed' ? 'Root Feed' : 'Site Posts'));
+      return;
+    }
     const route = routes[req.url ?? ''];
     if (!route) {
       res.writeHead(404).end('not found');
