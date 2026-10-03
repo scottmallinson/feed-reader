@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import * as repo from '../db/repo.js';
 import type { NewItem } from '../db/repo.js';
 import { excerpt, extractArticle, firstImage, htmlToText, sanitizeContent } from './content.js';
+import { discoverFeedFromPage, fetchDocument, isHtmlDocument } from './discover.js';
 
 type MediaNode = { $?: { url?: string; medium?: string; type?: string } };
 
@@ -153,13 +154,17 @@ export interface RefreshResult {
 }
 
 export async function refreshFeed(feedId: number): Promise<RefreshResult> {
-  const feedUrl = await repo.getFeedUrl(feedId);
+  let feedUrl = await repo.getFeedUrl(feedId);
   try {
-    const xml = await fetchText(
-      feedUrl,
-      'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5',
-    );
-    const feed = await parseFeed(xml);
+    let doc = await fetchDocument(feedUrl);
+    if (isHtmlDocument(doc)) {
+      // Subscribed to a web page (e.g. a site's home page): switch to the feed it advertises.
+      const discovered = await discoverFeedFromPage(doc);
+      await repo.updateFeedUrl(feedId, discovered);
+      feedUrl = discovered;
+      doc = await fetchDocument(feedUrl);
+    }
+    const feed = await parseFeed(doc.body);
     const normalized = (feed.items ?? [])
       .map((raw) => normalizeItem(raw, feedUrl))
       .filter((it): it is NewItem => it !== null);

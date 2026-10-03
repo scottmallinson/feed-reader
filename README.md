@@ -44,6 +44,8 @@ open http://localhost:3000
 
 Follow a feed from the sidebar (for example `https://rss.arxiv.org/rss/cs.CL` or
 `https://www.reddit.com/r/LocalAI/.rss`). It is fetched right away and then every 15 minutes.
+You can also paste a website's address (such as `https://simonwillison.net`): the reader uses the
+RSS or Atom feed the page advertises, or a common feed path such as `/feed` or `/rss`.
 
 ## Deploy to Vercel
 
@@ -206,7 +208,7 @@ All routes are under `/api` and accept or return JSON. When `API_TOKEN` is set t
 | `POST`   | `/boards`               | `{ name }` |
 | `DELETE` | `/boards/:id`           | Its feeds stay subscribed |
 | `GET`    | `/feeds`                | Subscriptions with unread counts and last fetch status |
-| `POST`   | `/feeds`                | `{ url, board_id? }`: subscribes and fetches right away |
+| `POST`   | `/feeds`                | `{ url, board_id? }`: subscribes and fetches right away. A web page's URL is replaced by the feed it advertises; `422` if it has none |
 | `PATCH`  | `/feeds/:id`            | `{ board_id }` |
 | `DELETE` | `/feeds/:id`            | Unsubscribe |
 | `POST`   | `/feeds/:id/refresh`    | Fetch one feed now |

@@ -215,6 +215,16 @@ export async function getFeedUrl(feedId: number): Promise<string> {
   return rows[0].url;
 }
 
+/** Points a feed at a new URL (after feed discovery). Fails if another feed already uses it. */
+export async function updateFeedUrl(feedId: number, url: string): Promise<void> {
+  const normalized = new URL(url).toString();
+  const taken = await query('SELECT 1 FROM feeds WHERE url = $1 AND id <> $2', [normalized, feedId]);
+  if (taken.rowCount) {
+    throw new Error(`Already subscribed to ${normalized}; remove this duplicate subscription`);
+  }
+  await query('UPDATE feeds SET url = $2 WHERE id = $1', [feedId, normalized]);
+}
+
 export async function recordFetch(
   feedId: number,
   meta: { title?: string | null; siteUrl?: string | null; error?: string | null },
