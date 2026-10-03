@@ -1,6 +1,6 @@
 import { JSDOM } from 'jsdom';
 import { Readability } from '@mozilla/readability';
-import sanitizeHtml from 'sanitize-html';
+import createDOMPurify, { type DOMPurify } from 'dompurify';
 
 function absolutize(value: string | undefined, baseUrl: string | undefined): string | undefined {
   if (!value) return value;
@@ -11,51 +11,83 @@ function absolutize(value: string | undefined, baseUrl: string | undefined): str
   }
 }
 
+// Tags and attributes kept in stored article HTML; everything else is stripped.
+const ALLOWED_TAGS = [
+  'address', 'article', 'aside', 'footer', 'header', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'hgroup', 'main', 'nav', 'section', 'blockquote', 'dd', 'div', 'dl', 'dt', 'figcaption',
+  'figure', 'hr', 'li', 'ol', 'p', 'pre', 'ul', 'a', 'abbr', 'b', 'bdi', 'bdo', 'br', 'cite',
+  'code', 'data', 'dfn', 'em', 'i', 'kbd', 'mark', 'q', 'rb', 'rp', 'rt', 'rtc', 'ruby', 's',
+  'samp', 'small', 'span', 'strong', 'sub', 'sup', 'time', 'u', 'var', 'wbr', 'caption', 'col',
+  'colgroup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'img', 'picture', 'source',
+  'video', 'audio',
+];
+const ATTRS_BY_TAG: Record<string, string[]> = {
+  a: ['href', 'title'],
+  img: ['src', 'srcset', 'alt', 'title', 'width', 'height'],
+  source: ['src', 'srcset', 'type', 'media'],
+  video: ['src', 'poster', 'controls', 'width', 'height'],
+  audio: ['src', 'controls'],
+  td: ['colspan', 'rowspan'],
+  th: ['colspan', 'rowspan'],
+  code: ['class'],
+};
+const GLOBAL_ATTRS = ['lang', 'dir'];
+const URL_ATTRS = new Set(['href', 'src', 'poster']);
+// http(s) and mailto, or relative URLs (resolved against the article URL below).
+const ALLOWED_URI_REGEXP = /^(?:(?:https?|mailto):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i;
+
+let purifier: DOMPurify | undefined;
+let currentBase: string | undefined;
+
+/** One DOMPurify instance on a jsdom window, created on first use. */
+function getPurifier(): DOMPurify {
+  if (purifier) return purifier;
+  const p = createDOMPurify(new JSDOM('').window as unknown as Parameters<typeof createDOMPurify>[0]);
+  // Drop attributes that are allowed somewhere but not on this element.
+  p.addHook('uponSanitizeAttribute', (node, data) => {
+    const allowed = ATTRS_BY_TAG[node.nodeName.toLowerCase()] ?? [];
+    if (!allowed.includes(data.attrName) && !GLOBAL_ATTRS.includes(data.attrName)) {
+      data.keepAttr = false;
+    }
+  });
+  // Make URLs absolute, then re-check the scheme of what they resolved to.
+  p.addHook('afterSanitizeAttributes', (node) => {
+    for (const attr of URL_ATTRS) {
+      const value = node.getAttribute(attr);
+      if (value === null) continue;
+      const resolved = absolutize(value, currentBase) ?? '';
+      const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(resolved)?.[1]?.toLowerCase();
+      const ok = node.nodeName === 'A' ? ['http', 'https', 'mailto'] : ['http', 'https'];
+      if (scheme && ok.includes(scheme)) node.setAttribute(attr, resolved);
+      else node.removeAttribute(attr);
+    }
+    if (node.nodeName === 'A') {
+      node.setAttribute('target', '_blank');
+      node.setAttribute('rel', 'noopener noreferrer');
+    }
+    if (node.nodeName === 'IMG') node.setAttribute('loading', 'lazy');
+  });
+  purifier = p;
+  return p;
+}
+
 /** Sanitizes feed/article HTML for display: no scripts, styles or event handlers; absolute URLs. */
 export function sanitizeContent(html: string, baseUrl?: string): string {
-  return sanitizeHtml(html, {
-    allowedTags: sanitizeHtml.defaults.allowedTags.concat([
-      'img',
-      'figure',
-      'figcaption',
-      'picture',
-      'source',
-      'video',
-      'audio',
-      'h1',
-      'h2',
-      'sup',
-      'sub',
-    ]),
-    allowedAttributes: {
-      a: ['href', 'title', 'target', 'rel'],
-      img: ['src', 'srcset', 'alt', 'title', 'width', 'height', 'loading'],
-      source: ['src', 'srcset', 'type', 'media'],
-      video: ['src', 'poster', 'controls', 'width', 'height'],
-      audio: ['src', 'controls'],
-      td: ['colspan', 'rowspan'],
-      th: ['colspan', 'rowspan'],
-      code: ['class'],
-      '*': ['lang', 'dir'],
-    },
-    allowedSchemes: ['http', 'https', 'mailto'],
-    allowedSchemesByTag: { img: ['http', 'https', 'data'], a: ['http', 'https', 'mailto'] },
-    transformTags: {
-      a: (tagName, attribs) => ({
-        tagName,
-        attribs: {
-          ...attribs,
-          href: absolutize(attribs.href, baseUrl) ?? '',
-          target: '_blank',
-          rel: 'noopener noreferrer',
-        },
-      }),
-      img: (tagName, attribs) => ({
-        tagName,
-        attribs: { ...attribs, src: absolutize(attribs.src, baseUrl) ?? '', loading: 'lazy' },
-      }),
-    },
-  }).trim();
+  const p = getPurifier();
+  currentBase = baseUrl;
+  try {
+    return p
+      .sanitize(html, {
+        ALLOWED_TAGS,
+        ALLOWED_ATTR: [...new Set([...Object.values(ATTRS_BY_TAG).flat(), ...GLOBAL_ATTRS])],
+        ALLOWED_URI_REGEXP,
+        ALLOW_DATA_ATTR: false,
+        ALLOW_ARIA_ATTR: false,
+      })
+      .trim();
+  } finally {
+    currentBase = undefined;
+  }
 }
 
 const BLOCK_TAGS = new Set([
