@@ -166,7 +166,6 @@ export function App() {
         await api.refreshFeed(selection.id);
       } else {
         await api.refreshAll();
-        await new Promise((r) => setTimeout(r, 2500));
       }
       await Promise.all([loadItems(false), loadSidebar()]);
     } catch (err) {

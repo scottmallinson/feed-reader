@@ -78,7 +78,10 @@ export const api = {
   unsubscribe: (id: number) => request<void>(`/feeds/${id}`, { method: 'DELETE' }),
   refreshFeed: (id: number) =>
     request<{ inserted: number; error?: string }>(`/feeds/${id}/refresh`, { method: 'POST' }),
-  refreshAll: () => request<{ started: boolean }>('/refresh', { method: 'POST' }),
+  refreshAll: () =>
+    request<{ summary: { feeds: number; inserted: number; errors: number } | null }>('/refresh', {
+      method: 'POST',
+    }),
 
   items: (query: ItemQuery) => request<Item[]>(`/items${qs(query)}`),
   item: (id: string) => request<Item>(`/items/${id}`),

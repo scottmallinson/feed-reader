@@ -1,0 +1,27 @@
+name: Refresh feeds
+
+# Vercel's Hobby plan runs cron jobs at most once a day, so this calls the deployment's
+# refresh endpoint more often. Set the FEED_READER_URL variable and CRON_SECRET secret in
+# the repository settings to enable it; without them each run is skipped.
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Call /api/cron/refresh
+        env:
+          FEED_READER_URL: ${{ vars.FEED_READER_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$FEED_READER_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "FEED_READER_URL or CRON_SECRET not configured; skipping."
+            exit 0
+          fi
+          curl --fail-with-body --silent --show-error --max-time 320 \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "${FEED_READER_URL%/}/api/cron/refresh"

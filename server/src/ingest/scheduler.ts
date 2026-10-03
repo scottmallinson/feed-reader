@@ -4,21 +4,40 @@ import { refreshAll } from './ingest.js';
 
 let running = false;
 
-/** Runs one ingestion pass unless one is already in flight. */
-export async function runIngestion(log: (msg: string) => void = console.log): Promise<void> {
-  if (running) return;
+export interface IngestionSummary {
+  feeds: number;
+  inserted: number;
+  errors: number;
+  ms: number;
+}
+
+/**
+ * Runs one ingestion pass unless one is already in flight in this process.
+ * Returns null when skipped or when the pass itself failed.
+ */
+export async function runIngestion(
+  log: (msg: string) => void = console.log,
+): Promise<IngestionSummary | null> {
+  if (running) return null;
   running = true;
   const started = Date.now();
   try {
     const results = await refreshAll();
-    const inserted = results.reduce((n, r) => n + r.inserted, 0);
     const failed = results.filter((r) => r.error);
+    const summary = {
+      feeds: results.length,
+      inserted: results.reduce((n, r) => n + r.inserted, 0),
+      errors: failed.length,
+      ms: Date.now() - started,
+    };
     log(
-      `ingest: ${results.length} feeds, ${inserted} new items, ${failed.length} errors in ${Date.now() - started}ms`,
+      `ingest: ${summary.feeds} feeds, ${summary.inserted} new items, ${summary.errors} errors in ${summary.ms}ms`,
     );
     for (const f of failed) log(`ingest: feed ${f.feedId} failed: ${f.error}`);
+    return summary;
   } catch (err) {
     log(`ingest: pass failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
   } finally {
     running = false;
   }

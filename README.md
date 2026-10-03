@@ -1,8 +1,9 @@
 # Feed Reader
 
-A self-hosted RSS/Atom reader (Feedly-style boards, read/saved state, three display modes,
-sharing) with a built-in [Model Context Protocol](https://modelcontextprotocol.io) server, so
-Claude Desktop or any MCP client can search, read and triage your feeds.
+An RSS/Atom reader (Feedly-style boards, read/saved state, three display modes, sharing) with a
+built-in [Model Context Protocol](https://modelcontextprotocol.io) server, so Claude Desktop or
+any MCP client can search, read and triage your feeds. Run it on your own machine or server, or
+deploy it to Vercel with a free Neon Postgres database.
 
 ```
 ┌──────────────┐  REST /api   ┌──────────────────────────┐        ┌────────────┐
@@ -20,7 +21,21 @@ Claude Desktop or any MCP client can search, read and triage your feeds.
   (`@modelcontextprotocol/sdk`). All three share one data layer (`server/src/db/repo.ts`).
 - **`web/`**: React + Vite single-page app, served by the API in production.
 
-## Quick start (Docker)
+## Deployment options
+
+The same code runs in both modes; only the entry point and the scheduler differ.
+
+|                     | Self-hosted (Docker or Node)                         | Vercel                                                        |
+| ------------------- | ---------------------------------------------------- | ------------------------------------------------------------- |
+| Entry point         | `server/src/api/index.ts`, a long-running server     | `api/index.mjs` → `server/src/vercel.ts`, a Vercel Function   |
+| Web UI              | Served by the API (`WEB_DIST_DIR`)                   | Static files on Vercel's CDN                                  |
+| Database            | Any Postgres 14+ (`docker compose` includes one)     | Neon via the Vercel Marketplace (free plan)                   |
+| Scheduled refresh   | In-process `node-cron`, every 15 minutes (`FETCH_CRON`), or the separate worker | `GET /api/cron/refresh` from Vercel Cron (daily on Hobby) and, optionally, GitHub Actions every 30 minutes |
+| MCP                 | stdio for Claude Desktop, or HTTP at `/mcp`          | HTTP at `/mcp`                                                |
+| `API_TOKEN`         | Optional, for trusted networks                       | Required: requests are refused without it                    |
+| Migrations          | On startup                                           | On the first request to a new instance                        |
+
+## Self-hosted (Docker)
 
 ```sh
 docker compose up -d --build
@@ -29,6 +44,34 @@ open http://localhost:3000
 
 Follow a feed from the sidebar (for example `https://rss.arxiv.org/rss/cs.CL` or
 `https://www.reddit.com/r/LocalAI/.rss`). It is fetched right away and then every 15 minutes.
+
+## Deploy to Vercel
+
+The repo deploys to Vercel as-is (`vercel.json`). The web UI is served as static files, and the
+REST API, `/mcp` and the refresh endpoint run as a single Vercel Function
+(`api/index.mjs` → `server/src/vercel.ts`). Migrations run automatically on the first request.
+
+1. Import the GitHub repo as a new Vercel project (keep the default settings; `vercel.json`
+   supplies the build).
+2. Add a database: **Storage → Create Database → Neon** (the free plan is enough) and connect
+   it to the project. The integration sets `DATABASE_URL`, which the app uses (it also accepts
+   `POSTGRES_URL`).
+3. Set these environment variables:
+   - `API_TOKEN`: **required.** The deployment refuses API and MCP requests without it. The
+     web UI asks for it once and keeps it in the browser.
+   - `CRON_SECRET`: a random string. Vercel Cron sends it to `/api/cron/refresh`.
+4. Redeploy.
+
+Feeds refresh when you add them, when you press refresh in the UI, and on a schedule:
+
+- **Vercel Cron** calls `GET /api/cron/refresh` once a day (06:00 UTC), the most the Hobby plan
+  allows. On Pro you can change the schedule in `vercel.json` to `*/15 * * * *`.
+- **GitHub Actions** (`.github/workflows/refresh-feeds.yml`) can call it every 30 minutes. Set the
+  repository variable `FEED_READER_URL` (for example `https://your-app.vercel.app`) and the
+  repository secret `CRON_SECRET` to enable it.
+
+MCP clients connect to `https://your-app.vercel.app/mcp` with `Authorization: Bearer <API_TOKEN>`,
+for example `npx mcp-remote https://your-app.vercel.app/mcp --header "Authorization: Bearer <API_TOKEN>"`.
 
 ## Local development
 
@@ -167,7 +210,8 @@ All routes are under `/api` and accept or return JSON. When `API_TOKEN` is set t
 | `PATCH`  | `/feeds/:id`            | `{ board_id }` |
 | `DELETE` | `/feeds/:id`            | Unsubscribe |
 | `POST`   | `/feeds/:id/refresh`    | Fetch one feed now |
-| `POST`   | `/refresh`              | Start a full ingestion pass |
+| `POST`   | `/refresh`              | Run a full ingestion pass and return a summary |
+| `GET`    | `/cron/refresh`         | Same, for schedulers. Accepts `CRON_SECRET` or `API_TOKEN` as the bearer token (open when neither is set, except on Vercel) |
 | `GET`    | `/items`                | `feed_id`, `board_id`, `status`, `saved`, `content` (include HTML), `q` (full-text), `limit`, `offset` |
 | `GET`    | `/items/:id`            | Includes `full_content` |
 | `PATCH`  | `/items/:id`            | `{ is_read?, is_saved?, board_id? }` |
@@ -177,7 +221,7 @@ All routes are under `/api` and accept or return JSON. When `API_TOKEN` is set t
 
 - Feed HTML is sanitized on the server during ingestion and again in the browser (DOMPurify).
 - With no `API_TOKEN`, anyone who can reach the port can read and change your reader state.
-  Bind it to localhost or a trusted network, or set a token.
+  Bind it to localhost or a trusted network, or set a token. On Vercel the token is mandatory.
 - The fetcher requests whatever URLs you subscribe to, plus the article links in those feeds
   (for Readability). If the server is reachable by people you don't trust, put it behind a
   token so they can't make it fetch internal addresses.

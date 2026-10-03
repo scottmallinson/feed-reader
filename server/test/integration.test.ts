@@ -6,6 +6,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/api/app.js';
+import { config } from '../src/config.js';
+import { migrate } from '../src/db/migrate.js';
 import { closePool } from '../src/db/pool.js';
 import * as repo from '../src/db/repo.js';
 import { refreshFeed } from '../src/ingest/ingest.js';
@@ -117,6 +119,54 @@ describe('REST API', () => {
     await request(app).get('/api/items/999999').expect(404);
     await request(app).get('/api/items/abc').expect(404);
     await request(app).patch('/api/feeds/999').send({ board_id: null }).expect(404);
+  });
+});
+
+describe('deployment hardening', () => {
+  it('re-running migrations is a no-op', async () => {
+    const logs: string[] = [];
+    await Promise.all([migrate((m) => logs.push(m)), migrate((m) => logs.push(m))]);
+    expect(logs).toEqual([]);
+  });
+
+  it('protects the cron endpoint with CRON_SECRET or the API token', async () => {
+    const saved = { ...config };
+    try {
+      config.cronSecret = 'cron-s3cret';
+      config.apiToken = 'api-t0ken';
+      await request(app).get('/api/cron/refresh').expect(401);
+      await request(app).get('/api/cron/refresh').set('authorization', 'Bearer wrong').expect(401);
+      const viaCron = await request(app)
+        .get('/api/cron/refresh')
+        .set('authorization', 'Bearer cron-s3cret')
+        .expect(200);
+      expect(viaCron.body.summary).toMatchObject({ feeds: 2, errors: 0 });
+      await request(app).get('/api/cron/refresh').set('authorization', 'Bearer api-t0ken').expect(200);
+      // The cron secret is not an API credential.
+      await request(app).get('/api/feeds').set('authorization', 'Bearer cron-s3cret').expect(401);
+    } finally {
+      Object.assign(config, saved);
+    }
+  });
+
+  it('refuses API and MCP requests on Vercel when no API token is configured', async () => {
+    const saved = { ...config };
+    try {
+      config.onVercel = true;
+      config.apiToken = undefined;
+      config.cronSecret = undefined;
+      await request(app).get('/api/feeds').expect(503);
+      await request(app).post('/mcp').send({}).expect(503);
+      await request(app).get('/api/cron/refresh').expect(401);
+      await request(app).get('/healthz').expect(200);
+    } finally {
+      Object.assign(config, saved);
+    }
+  });
+
+  it('awaits a full refresh from the API', async () => {
+    const res = await request(app).post('/api/refresh').expect(200);
+    expect(res.body.summary).toMatchObject({ feeds: 2, inserted: 0, errors: 0 });
   });
 });
 

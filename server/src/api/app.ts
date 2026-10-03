@@ -41,9 +41,29 @@ const markReadBody = z.union([
   z.object({ feed_id: id.optional(), board_id: id.optional(), all: z.literal(true).optional() }),
 ]);
 
+function bearer(req: Request): string | undefined {
+  const header = req.headers.authorization;
+  return header?.startsWith('Bearer ') ? header.slice(7) : undefined;
+}
+
 function requireToken(req: Request, res: Response, next: NextFunction) {
-  if (!config.apiToken) return next();
-  if (req.headers.authorization === `Bearer ${config.apiToken}`) return next();
+  if (!config.apiToken) {
+    // A public deployment without a token would expose everything; refuse instead.
+    if (config.onVercel) {
+      res.status(503).json({ error: 'API_TOKEN must be set on this deployment' });
+      return;
+    }
+    return next();
+  }
+  if (bearer(req) === config.apiToken) return next();
+  res.status(401).json({ error: 'Unauthorized' });
+}
+
+/** Scheduled refreshes authenticate with CRON_SECRET (sent by Vercel Cron) or the API token. */
+function requireCronAuth(req: Request, res: Response, next: NextFunction) {
+  const secrets = [config.cronSecret, config.apiToken].filter(Boolean);
+  if (secrets.length === 0 && !config.onVercel) return next();
+  if (secrets.includes(bearer(req))) return next();
   res.status(401).json({ error: 'Unauthorized' });
 }
 
@@ -55,6 +75,10 @@ export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
 
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true });
+  });
+
+  app.get('/api/cron/refresh', requireCronAuth, async (_req, res) => {
+    res.json({ summary: await runIngestion() });
   });
 
   const api = express.Router();
@@ -97,9 +121,9 @@ export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
     await repo.getFeed(userId, feedId);
     res.json(await refreshFeed(feedId));
   });
+  // Awaited rather than fire-and-forget so it also completes on serverless platforms.
   api.post('/refresh', async (_req, res) => {
-    void runIngestion();
-    res.status(202).json({ started: true });
+    res.json({ summary: await runIngestion() });
   });
 
   // ------------------------------------------------------------ items

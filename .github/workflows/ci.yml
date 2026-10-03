@@ -33,3 +33,12 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://feeds:feeds@localhost:5432/feeds_test
       - run: npm run build
+      - name: Vercel entry point loads
+        run: node --input-type=module -e "const m = await import('./api/index.mjs'); if (typeof m.default !== 'function') throw new Error('api/index.mjs has no default handler');"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build self-hosted image
+        run: docker build -t feed-reader:ci .
