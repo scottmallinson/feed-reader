@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { config } from '../config.js';
 import * as repo from '../db/repo.js';
 import { NoFeedFoundError, resolveFeedUrl } from '../ingest/discover.js';
+import { OpmlParseError, parseOpml } from '../ingest/opml.js';
 import { refreshFeed } from '../ingest/ingest.js';
 import { runIngestion } from '../ingest/scheduler.js';
 import { mcpHttpHandler } from '../mcp/http.js';
@@ -29,6 +30,7 @@ const listQuery = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
+const opmlBody = z.object({ opml: z.string().min(1) });
 const subscribeBody = z.object({ url: z.url(), board_id: id.nullable().optional() });
 const feedPatch = z.object({ board_id: id.nullable() });
 const boardBody = z.object({ name: z.string().trim().min(1).max(100) });
@@ -72,7 +74,8 @@ export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
   const userId = opts.userId ?? config.userId;
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '1mb' }));
+  // OPML imports can be a few MB; Vercel caps request bodies at 4.5 MB.
+  app.use(express.json({ limit: '4mb' }));
 
   app.get('/healthz', (_req, res) => {
     res.json({ ok: true });
@@ -110,6 +113,17 @@ export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
     const result = await refreshFeed(feedId);
     res.status(201).json({ ...(await repo.getFeed(userId, feedId)), refresh: result });
   });
+  // Import subscriptions from OPML: raw XML body, or JSON { opml: "<opml>..." }.
+  api.post(
+    '/opml',
+    express.text({ type: ['text/xml', 'application/xml', 'text/x-opml', 'application/octet-stream'], limit: '4mb' }),
+    async (req, res) => {
+      const xml = typeof req.body === 'string' ? req.body : opmlBody.parse(req.body).opml;
+      const { feeds, invalid } = parseOpml(xml);
+      const result = await repo.importFeeds(userId, feeds);
+      res.json({ ...result, invalid });
+    },
+  );
   api.patch('/feeds/:id', async (req, res) => {
     const feedId = id.parse(req.params.id);
     await repo.setFeedBoard(userId, feedId, feedPatch.parse(req.body).board_id);
@@ -195,6 +209,8 @@ export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof z.ZodError) {
       res.status(400).json({ error: 'Invalid request', issues: err.issues });
+    } else if (err instanceof OpmlParseError) {
+      res.status(400).json({ error: err.message });
     } else if (err instanceof NoFeedFoundError) {
       res.status(422).json({ error: err.message });
     } else if (err instanceof repo.NotFoundError) {
