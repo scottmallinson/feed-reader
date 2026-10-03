@@ -4,6 +4,7 @@
   "installCommand": "npm ci",
   "buildCommand": "npm run build",
   "outputDirectory": "web/dist",
+  "regions": ["fra1"],
   "functions": {
     "api/index.mjs": {
       "maxDuration": 300,

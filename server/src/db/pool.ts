@@ -7,7 +7,12 @@ pg.types.setTypeParser(pg.types.builtins.INT8, (v) => v);
 let pool: pg.Pool | undefined;
 
 export function getPool(): pg.Pool {
-  pool ??= new pg.Pool({ connectionString: config.databaseUrl, max: config.poolMax });
+  if (!pool) {
+    pool = new pg.Pool({ connectionString: config.databaseUrl, max: config.poolMax });
+    // Idle connections can be dropped by the server or a pooler (Neon suspends idle computes).
+    // Without a listener that 'error' event would crash the process; the pool reconnects on demand.
+    pool.on('error', (err) => console.error('postgres pool error', err.message));
+  }
   return pool;
 }
 
