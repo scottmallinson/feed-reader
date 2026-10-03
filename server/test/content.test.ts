@@ -1,3 +1,4 @@
+import { JSDOM } from 'jsdom';
 import { describe, expect, it } from 'vitest';
 import { excerpt, extractArticle, htmlToText, sanitizeContent } from '../src/ingest/content.js';
 import { normalizeItem, parseFeed } from '../src/ingest/ingest.js';
@@ -17,6 +18,48 @@ describe('sanitizeContent', () => {
 
   it('drops javascript: links', () => {
     expect(sanitizeContent('<a href="javascript:alert(1)">x</a>')).not.toContain('javascript');
+  });
+
+  it.each([
+    ['svg onload', '<svg onload="alert(1)"><circle /></svg>'],
+    ['svg animate URI', '<svg><a><animate attributeName="href" values="javascript:alert(1)" /></a></svg>'],
+    ['iframe', '<iframe src="https://evil.test"></iframe>'],
+    ['style element', '<style>body{background:url(javascript:alert(1))}</style>'],
+    ['inline style', '<p style="background:url(javascript:alert(1))">x</p>'],
+    ['form action', '<form action="javascript:alert(1)"><button formaction="javascript:alert(1)">x</button></form>'],
+    ['img onerror', '<img src="x" onerror="alert(1)">'],
+    ['img javascript src', '<img src="javascript:alert(1)">'],
+    ['img data URI', '<img src="data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=">'],
+    ['video poster', '<video poster="javascript:alert(1)"></video>'],
+    ['textarea mutation', '<textarea/><img src=x onerror=alert(1)></textarea/>'],
+    ['entity-encoded scheme', '<a href="jav&#x09;ascript:alert(1)">x</a>'],
+    ['object/embed', '<object data="javascript:alert(1)"></object><embed src="javascript:alert(1)">'],
+  ])('neutralizes %s', (_name, html) => {
+    // Inspect the parsed result: escaped text is harmless, live elements and attributes are not.
+    const doc = new JSDOM(`<body>${sanitizeContent(html, 'https://example.com/')}</body>`).window.document;
+    expect(doc.querySelector('script, iframe, style, svg, form, button, object, embed, textarea')).toBeNull();
+    for (const el of doc.body.querySelectorAll('*')) {
+      for (const attr of el.attributes) {
+        expect(attr.name).not.toMatch(/^on|^style$|^formaction$|^action$/i);
+        if (['href', 'src', 'poster'].includes(attr.name)) {
+          expect(attr.value).toMatch(/^(https?:|mailto:)/);
+        }
+      }
+    }
+  });
+
+  it('keeps allowed formatting and per-tag attributes only', () => {
+    const out = sanitizeContent(
+      '<h2 class="x" lang="en">T</h2><table><tr><td colspan="2" title="t">c</td></tr></table><a href="https://a.test" title="t" class="c">a</a>',
+    );
+    expect(out).toContain('<h2 lang="en">T</h2>');
+    expect(out).toContain('<td colspan="2">c</td>');
+    expect(out).toContain('<a href="https://a.test/" title="t" target="_blank" rel="noopener noreferrer">a</a>');
+  });
+
+  it('keeps mailto links but not mailto images', () => {
+    expect(sanitizeContent('<a href="mailto:a@b.test">m</a>')).toContain('href="mailto:a@b.test"');
+    expect(sanitizeContent('<img src="mailto:a@b.test">')).not.toContain('mailto');
   });
 });
 
