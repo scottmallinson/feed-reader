@@ -47,6 +47,13 @@ Follow a feed from the sidebar (for example `https://rss.arxiv.org/rss/cs.CL` or
 You can also paste a website's address (such as `https://simonwillison.net`): the reader uses the
 RSS or Atom feed the page advertises, or a common feed path such as `/feed` or `/rss`.
 
+To move from another reader, use **Import OPML…** in the sidebar with your reader's OPML export.
+OPML folders become boards (an existing board with the same name is reused), feeds you already
+follow are skipped, and so are repeats within the file. Two URLs count as the same feed when they
+differ only by `http`/`https`, a leading `www.`, letter case in the host, a trailing slash or a
+fragment. Imported feeds are fetched straight away in the background. Feeds and boards are listed
+alphabetically.
+
 ## Deploy to Vercel
 
 The repo deploys to Vercel as-is (`vercel.json`). The web UI is served as static files, and the
@@ -209,6 +216,7 @@ All routes are under `/api` and accept or return JSON. When `API_TOKEN` is set t
 | `DELETE` | `/boards/:id`           | Its feeds stay subscribed |
 | `GET`    | `/feeds`                | Subscriptions with unread counts and last fetch status |
 | `POST`   | `/feeds`                | `{ url, board_id? }`: subscribes and fetches right away. A web page's URL is replaced by the feed it advertises; `422` if it has none |
+| `POST`   | `/opml`                 | Import subscriptions: an OPML body (`text/xml` or `text/x-opml`) or `{ opml }`. Returns `added`, `skipped` (with `reason`), `boardsCreated` and `invalid`; `400` for a file that isn't OPML |
 | `PATCH`  | `/feeds/:id`            | `{ board_id }` |
 | `DELETE` | `/feeds/:id`            | Unsubscribe |
 | `POST`   | `/feeds/:id/refresh`    | Fetch one feed now |

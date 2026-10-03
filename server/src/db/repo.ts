@@ -1,3 +1,4 @@
+import { feedKey, type OpmlFeed } from '../ingest/opml.js';
 import { escapeLike, slugify } from '../lib/slug.js';
 import { getPool, query } from './pool.js';
 
@@ -162,19 +163,95 @@ export async function subscribe(
   boardId: number | null = null,
 ): Promise<number> {
   const normalized = new URL(url).toString();
-  const { rows } = await query<{ id: number }>(
-    `INSERT INTO feeds (url) VALUES ($1)
-     ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url
-     RETURNING id`,
-    [normalized],
+  // Reuse an existing feed stored under a URL variant (http/https, www., trailing slash).
+  const key = feedKey(normalized);
+  const { rows: candidates } = await query<{ id: number; url: string }>(
+    'SELECT id, url FROM feeds WHERE url ILIKE $1',
+    [`%${escapeLike(key.split('/')[0])}%`],
   );
-  const feedId = rows[0].id;
+  let feedId = candidates.find((f) => feedKey(f.url) === key)?.id;
+  if (feedId === undefined) {
+    const { rows } = await query<{ id: number }>(
+      `INSERT INTO feeds (url) VALUES ($1)
+       ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url
+       RETURNING id`,
+      [normalized],
+    );
+    feedId = rows[0].id;
+  }
   await query(
     `INSERT INTO subscriptions (user_id, feed_id, board_id) VALUES ($1, $2, $3)
      ON CONFLICT (user_id, feed_id) DO UPDATE SET board_id = coalesce(EXCLUDED.board_id, subscriptions.board_id)`,
     [userId, feedId, boardId],
   );
   return feedId;
+}
+
+export type ImportSkipReason = 'already subscribed' | 'duplicate in file';
+
+export interface ImportResult {
+  added: { id: number; url: string; title: string | null; board: string | null }[];
+  skipped: { url: string; title: string | null; reason: ImportSkipReason }[];
+  boardsCreated: string[];
+}
+
+/**
+ * Subscribes the user to feeds from an OPML import. Feeds the user already follows, and repeats
+ * within the file, are skipped (compared by feedKey, so http/https, "www." and trailing-slash
+ * variants count as the same feed). OPML folders become boards, reusing boards of the same name.
+ */
+export async function importFeeds(userId: number, feeds: OpmlFeed[]): Promise<ImportResult> {
+  const result: ImportResult = { added: [], skipped: [], boardsCreated: [] };
+  const subscribed = new Set((await listFeeds(userId)).map((f) => feedKey(f.url)));
+  const { rows: allFeeds } = await query<{ id: number; url: string }>('SELECT id, url FROM feeds');
+  const knownFeeds = new Map(allFeeds.map((f) => [feedKey(f.url), f.id]));
+  const boards = new Map((await listBoards(userId)).map((b) => [b.name.toLowerCase(), b.id]));
+  const seen = new Set<string>();
+
+  for (const feed of feeds) {
+    const key = feedKey(feed.url);
+    if (subscribed.has(key)) {
+      result.skipped.push({ url: feed.url, title: feed.title, reason: 'already subscribed' });
+      continue;
+    }
+    if (seen.has(key)) {
+      result.skipped.push({ url: feed.url, title: feed.title, reason: 'duplicate in file' });
+      continue;
+    }
+    seen.add(key);
+
+    let boardId: number | null = null;
+    const folder = feed.folder?.trim() || null;
+    if (folder) {
+      boardId = boards.get(folder.toLowerCase()) ?? null;
+      if (boardId === null) {
+        const board = await createBoard(userId, folder);
+        boards.set(folder.toLowerCase(), board.id);
+        boardId = board.id;
+        result.boardsCreated.push(board.name);
+      }
+    }
+
+    // Reuse a feed another subscription already created (even under a URL variant).
+    let feedId = knownFeeds.get(key);
+    if (feedId === undefined) {
+      const { rows } = await query<{ id: number }>(
+        `INSERT INTO feeds (url, title, site_url) VALUES ($1, $2, $3)
+         ON CONFLICT (url) DO UPDATE SET title = coalesce(feeds.title, EXCLUDED.title)
+         RETURNING id`,
+        [feed.url, feed.title, feed.siteUrl],
+      );
+      feedId = rows[0].id;
+      knownFeeds.set(key, feedId);
+    }
+    await query(
+      `INSERT INTO subscriptions (user_id, feed_id, board_id) VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, feed_id) DO NOTHING`,
+      [userId, feedId, boardId],
+    );
+    result.added.push({ id: feedId, url: feed.url, title: feed.title, board: folder });
+  }
+  return result;
 }
 
 export async function setFeedBoard(userId: number, feedId: number, boardId: number | null) {

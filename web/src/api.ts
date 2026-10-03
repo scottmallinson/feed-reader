@@ -1,5 +1,12 @@
 import type { Board, Feed, Item, ReadStatus } from './types';
 
+export interface OpmlImportResult {
+  added: { id: number; url: string; title: string | null; board: string | null }[];
+  skipped: { url: string; title: string | null; reason: 'already subscribed' | 'duplicate in file' }[];
+  boardsCreated: string[];
+  invalid: string[];
+}
+
 const TOKEN_KEY = 'feed-reader-token';
 
 export function getToken(): string | null {
@@ -75,6 +82,8 @@ export const api = {
     }),
   setFeedBoard: (id: number, board_id: number | null) =>
     request<Feed>(`/feeds/${id}`, { method: 'PATCH', body: JSON.stringify({ board_id }) }),
+  importOpml: (opml: string) =>
+    request<OpmlImportResult>('/opml', { method: 'POST', body: JSON.stringify({ opml }) }),
   unsubscribe: (id: number) => request<void>(`/feeds/${id}`, { method: 'DELETE' }),
   refreshFeed: (id: number) =>
     request<{ inserted: number; error?: string }>(`/feeds/${id}/refresh`, { method: 'POST' }),

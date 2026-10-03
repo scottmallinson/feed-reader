@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, setToken, type ItemQuery } from './api';
+import { describeImport } from './importSummary';
 import { ArticleView } from './components/ArticleView';
 import { ItemList } from './components/ItemList';
 import { Sidebar } from './components/Sidebar';
@@ -46,6 +47,7 @@ export function App() {
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [needsToken, setNeedsToken] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -214,6 +216,23 @@ export function App() {
           select({ type: 'feed', id: feed.id });
           if (feed.refresh.error) setError(`Subscribed, but the first fetch failed: ${feed.refresh.error}`);
         }}
+        onImportOpml={async (file) => {
+          const result = await api.importOpml(await file.text());
+          await loadSidebar();
+          if (result.added.length > 0) {
+            // Fetch the new feeds in the background; the summary is returned straight away.
+            setNotice(`Fetching ${result.added.length} imported feed${result.added.length === 1 ? '' : 's'}…`);
+            api
+              .refreshAll()
+              .then(() => Promise.all([loadSidebar(), loadItems(false)]))
+              .then(() => setNotice(null))
+              .catch((err) => {
+                setNotice(null);
+                handleError(err);
+              });
+          }
+          return describeImport(result);
+        }}
         onCreateBoard={async (name) => {
           try {
             await api.createBoard(name);
@@ -313,6 +332,11 @@ export function App() {
           )}
         </header>
 
+        {notice && (
+          <div className="banner notice" role="status">
+            {notice}
+          </div>
+        )}
         {error && (
           <div className="banner" role="alert">
             {error}

@@ -169,6 +169,91 @@ describe('REST API', () => {
   });
 });
 
+describe('OPML import', () => {
+  const opml = (body: string) => `<?xml version="1.0"?><opml version="2.0"><head/><body>${body}</body></opml>`;
+
+  it('imports new feeds, skips ones already followed and duplicates, and maps folders to boards', async () => {
+    const before = await repo.listFeeds(USER);
+    const followed = before.find((f) => f.url.endsWith('/arxiv.xml'))!;
+    // Same feed as an existing subscription, written differently (scheme/www/trailing slash).
+    const variant = followed.url.replace('http://', 'https://') + '/';
+    const xml = opml(`
+      <outline text="Imported Board">
+        <outline type="rss" text="Zeta Feed" xmlUrl="https://zeta.test/feed"/>
+        <outline type="rss" text="Alpha Feed" xmlUrl="https://alpha.test/rss"/>
+      </outline>
+      <outline type="rss" text="AI research dup board" xmlUrl="https://beta.test/atom.xml"/>
+      <outline type="rss" text="Already" xmlUrl="${variant}"/>
+      <outline type="rss" text="Alpha again" xmlUrl="http://www.alpha.test/rss/"/>
+      <outline type="rss" text="Bad" xmlUrl="javascript:alert(1)"/>`);
+
+    const cleanup = async () => {
+      for (const f of await repo.listFeeds(USER)) {
+        if (!before.some((b) => b.id === f.id)) await repo.unsubscribe(USER, f.id);
+      }
+      const created = (await repo.listBoards(USER)).find((b) => b.name === 'Imported Board');
+      if (created) await repo.deleteBoard(USER, created.id);
+    };
+    try {
+    const res = await request(app).post('/api/opml').send({ opml: xml }).expect(200);
+    expect(res.body.added.map((a: { url: string }) => a.url)).toEqual([
+      'https://zeta.test/feed',
+      'https://alpha.test/rss',
+      'https://beta.test/atom.xml',
+    ]);
+    expect(res.body.skipped).toEqual([
+      { url: variant, title: 'Already', reason: 'already subscribed' },
+      { url: 'http://www.alpha.test/rss/', title: 'Alpha again', reason: 'duplicate in file' },
+    ]);
+    expect(res.body.boardsCreated).toEqual(['Imported Board']);
+    expect(res.body.invalid).toEqual(['javascript:alert(1)']);
+
+    // Titles from the OPML show until the first fetch, and the list is alphabetical.
+    const after = await repo.listFeeds(USER);
+    expect(after).toHaveLength(before.length + 3);
+    const names = after.map((f) => f.title ?? f.url);
+    expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })));
+    const board = (await repo.listBoards(USER)).find((b) => b.name === 'Imported Board')!;
+    expect(after.filter((f) => f.board_id === board.id).map((f) => f.title)).toEqual(['Alpha Feed', 'Zeta Feed']);
+
+    // Re-importing the same file adds nothing.
+    const again = await request(app).post('/api/opml').set('content-type', 'text/x-opml').send(xml).expect(200);
+    expect(again.body.added).toEqual([]);
+    expect(again.body.skipped.every((s: { reason: string }) => s.reason === 'already subscribed')).toBe(true);
+    expect(again.body.skipped).toHaveLength(5);
+    expect(again.body.boardsCreated).toEqual([]);
+
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('reuses an existing board with the same name (case-insensitive)', async () => {
+    const res = await request(app)
+      .post('/api/opml')
+      .send({ opml: opml('<outline text="ai research"><outline xmlUrl="https://gamma.test/feed" text="Gamma"/></outline>') })
+      .expect(200);
+    expect(res.body.boardsCreated).toEqual([]);
+    const gamma = (await repo.listFeeds(USER)).find((f) => f.url === 'https://gamma.test/feed')!;
+    expect(gamma.board_id).toBe(boardId);
+    await repo.unsubscribe(USER, gamma.id);
+  });
+
+  it('rejects malformed OPML with 400', async () => {
+    const res = await request(app).post('/api/opml').set('content-type', 'text/xml').send('<html>no</html>').expect(400);
+    expect(res.body.error).toMatch(/Not a valid OPML file/);
+    await request(app).post('/api/opml').send({}).expect(400);
+  });
+
+  it('does not create a second feed when following a URL variant of an existing one', async () => {
+    const before = await repo.listFeeds(USER);
+    const followed = before.find((f) => f.url.endsWith('/arxiv.xml'))!;
+    const id = await repo.subscribe(USER, followed.url + '/');
+    expect(id).toBe(followed.id);
+    expect(await repo.listFeeds(USER)).toHaveLength(before.length);
+  });
+});
+
 describe('deployment hardening', () => {
   it('re-running migrations is a no-op', async () => {
     const logs: string[] = [];

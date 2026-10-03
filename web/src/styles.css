@@ -159,6 +159,8 @@ button:disabled { opacity: 0.5; cursor: default; }
   justify-content: space-between;
   align-items: center;
 }
+.banner.notice { background: var(--accent-soft); color: var(--text); }
+.note { color: var(--muted); font-size: 13px; margin: 0; }
 .empty { padding: 80px 0; text-align: center; color: var(--muted); }
 .muted { color: var(--muted); }
 .center { text-align: center; padding: 16px; }

@@ -1,4 +1,5 @@
-import { Fragment, useState, type FormEvent, type ReactNode } from 'react';
+import { Fragment, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
+import { sortByName } from '../sort';
 import type { Board, Feed, Selection } from '../types';
 
 interface Props {
@@ -7,6 +8,8 @@ interface Props {
   selection: Selection;
   onSelect: (s: Selection) => void;
   onSubscribe: (url: string, boardId: number | null) => Promise<void>;
+  /** Imports an OPML file; resolves to a one-line summary for the user. */
+  onImportOpml: (file: File) => Promise<string>;
   onCreateBoard: (name: string) => Promise<void>;
   onDeleteBoard: (board: Board) => void;
   onUnsubscribe: (feed: Feed) => void;
@@ -28,6 +31,9 @@ export function Sidebar(props: Props) {
   const [boardName, setBoardName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importMessage, setImportMessage] = useState<{ text: string; isError: boolean } | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const totalUnread = feeds.reduce((n, f) => n + f.unread_count, 0);
 
   const nav = (s: Selection, label: string, count?: number, extra?: ReactNode, key?: string | number) => (
@@ -54,6 +60,21 @@ export function Sidebar(props: Props) {
     }
   }
 
+  async function importOpml(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-importing the same file
+    if (!file) return;
+    setImporting(true);
+    setImportMessage(null);
+    try {
+      setImportMessage({ text: await props.onImportOpml(file), isError: false });
+    } catch (err) {
+      setImportMessage({ text: err instanceof Error ? err.message : String(err), isError: true });
+    } finally {
+      setImporting(false);
+    }
+  }
+
   async function createBoard(e: FormEvent) {
     e.preventDefault();
     if (!boardName.trim()) return;
@@ -61,7 +82,8 @@ export function Sidebar(props: Props) {
     setBoardName('');
   }
 
-  const feedsIn = (boardId: number | null) => feeds.filter((f) => f.board_id === boardId);
+  const feedsIn = (boardId: number | null) => sortByName(feeds.filter((f) => f.board_id === boardId));
+  const sortedBoards = sortByName(boards);
 
   const feedRow = (f: Feed) =>
     nav(
@@ -81,7 +103,7 @@ export function Sidebar(props: Props) {
           onChange={(e) => props.onMoveFeed(f, e.target.value ? Number(e.target.value) : null)}
         >
           <option value="">No board</option>
-          {boards.map((b) => (
+          {sortedBoards.map((b) => (
             <option key={b.id} value={b.id}>
               {b.name}
             </option>
@@ -104,7 +126,7 @@ export function Sidebar(props: Props) {
 
       <h4>Boards</h4>
       <ul className="nav">
-        {boards.map((b) => (
+        {sortedBoards.map((b) => (
           <Fragment key={b.id}>
             {nav(
               { type: 'board', id: b.id },
@@ -157,7 +179,7 @@ export function Sidebar(props: Props) {
         <div className="inline-form">
           <select value={boardForNew} onChange={(e) => setBoardForNew(e.target.value)} aria-label="Board">
             <option value="">No board</option>
-            {boards.map((b) => (
+            {sortedBoards.map((b) => (
               <option key={b.id} value={b.id}>
                 {b.name}
               </option>
@@ -169,6 +191,26 @@ export function Sidebar(props: Props) {
         </div>
         {error && <p className="error">{error}</p>}
       </form>
+
+      <h4>Import</h4>
+      <div className="stack-form">
+        <input
+          ref={fileInput}
+          type="file"
+          accept=".opml,.xml,text/xml,application/xml,text/x-opml"
+          hidden
+          onChange={importOpml}
+          aria-label="OPML file"
+        />
+        <button type="button" disabled={importing} onClick={() => fileInput.current?.click()}>
+          {importing ? 'Importing…' : 'Import OPML…'}
+        </button>
+        {importMessage && (
+          <p className={importMessage.isError ? 'error' : 'note'} role="status">
+            {importMessage.text}
+          </p>
+        )}
+      </div>
     </nav>
   );
 }
