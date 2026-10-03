@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>LocalAI</title>
+  <link href="https://www.reddit.com/r/LocalAI/"/>
+  <id>https://www.reddit.com/r/LocalAI/.rss</id>
+  <updated>2026-10-01T00:00:00Z</updated>
+  <entry>
+    <title>Running a 1B model on a Raspberry Pi</title>
+    <link href="{{BASE}}/article/pi"/>
+    <id>t3_pi</id>
+    <author><name>/u/tinkerer</name></author>
+    <updated>{{RECENT}}</updated>
+    <content type="html">&lt;p&gt;Short teaser about a tiny LLM.&lt;/p&gt;</content>
+  </entry>
+</feed>

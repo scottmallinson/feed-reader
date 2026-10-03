@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:media="http://search.yahoo.com/mrss/">
+  <channel>
+    <title>cs.CL updates on arXiv.org</title>
+    <link>https://arxiv.org/</link>
+    <description>Computation and Language</description>
+    <item>
+      <title>TinyLM: Small Language Models That Punch Above Their Weight</title>
+      <link>https://arxiv.org/abs/2610.00001</link>
+      <guid>oai:arXiv.org:2610.00001</guid>
+      <dc:creator>A. Researcher</dc:creator>
+      <pubDate>{{RECENT}}</pubDate>
+      <media:thumbnail url="https://arxiv.org/thumb/1.png"/>
+      <content:encoded><![CDATA[
+        <p>We present <b>TinyLM</b>, a family of tiny LLM architectures with 100M parameters.</p>
+        <p onclick="alert(1)">Distillation from a larger teacher model yields strong reasoning for a small language model.</p>
+        <script>alert('xss')</script>
+        <p><a href="/abs/2610.00001v2">Version 2</a> <img src="/fig1.png" alt="fig"></p>
+        <p>Extended discussion: quantization, pruning, and mixture-of-experts routing all contribute to the compact footprint, and we benchmark extensively on reasoning tasks across many languages and domains.</p>
+      ]]></content:encoded>
+    </item>
+    <item>
+      <title>Protein folding with diffusion</title>
+      <link>https://arxiv.org/abs/2610.00002</link>
+      <guid>oai:arXiv.org:2610.00002</guid>
+      <pubDate>{{OLD}}</pubDate>
+      <description>A biology paper about diffusion models for protein structure prediction, unrelated to language. It contains enough words to skip readability extraction entirely because it is long enough for that threshold in the test configuration here.</description>
+    </item>
+    <item>
+      <title>Duplicate of TinyLM by URL</title>
+      <link>https://arxiv.org/abs/2610.00001</link>
+      <guid>different-guid-same-url</guid>
+      <description>Same URL, should be deduplicated.</description>
+    </item>
+  </channel>
+</rss>

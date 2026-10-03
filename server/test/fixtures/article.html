@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><title>Running a 1B model on a Raspberry Pi</title>
+<meta property="og:image" content="/images/pi.jpg"></head>
+<body>
+<nav>Home | About | Login</nav>
+<article>
+  <h1>Running a 1B model on a Raspberry Pi</h1>
+  <p>This weekend I got a one billion parameter small language model running on a Raspberry Pi 5 with 8GB of RAM.</p>
+  <p>Using 4-bit quantization and llama.cpp, generation speed reached roughly six tokens per second, which is plenty for a home assistant.</p>
+  <p>The key tricks were memory-mapped weights, a smaller context window, and pinning the process to the performance cores so thermal throttling stayed manageable.</p>
+  <p>Next I want to try speculative decoding with an even tinier draft model to see if I can double throughput without a quality loss.</p>
+</article>
+<footer>Copyright</footer>
+</body></html>
