@@ -23,7 +23,17 @@ function init(): Promise<void> {
   return ready;
 }
 
+// A stray rejection or error must not take the whole instance down; log it instead.
+process.on('unhandledRejection', (err) => console.error('unhandled rejection', err));
+process.on('uncaughtException', (err) => console.error('uncaught exception', err));
+
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
+  // Liveness check that does not touch the database, so it isolates function start-up problems.
+  if (req.url === '/healthz' || req.url?.startsWith('/healthz?')) {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
   try {
     await init();
   } catch (err) {
