@@ -13,12 +13,22 @@ function bool(name: string, fallback: boolean): boolean {
 }
 
 export const config = {
-  databaseUrl: process.env.DATABASE_URL ?? 'postgres://feeds:feeds@localhost:5432/feeds',
+  // DATABASE_URL, or POSTGRES_URL as set by Vercel's Neon integration.
+  databaseUrl:
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    'postgres://feeds:feeds@localhost:5432/feeds',
+  /** True when running as a Vercel Function. */
+  onVercel: Boolean(process.env.VERCEL),
+  /** Max Postgres connections per process; keep it small for serverless. */
+  poolMax: int('PG_POOL_MAX', process.env.VERCEL ? 3 : 10),
   /** The user whose state the API and MCP server read and write. */
   userId: int('FEED_USER_ID', 1),
   port: int('PORT', 3000),
   /** Optional shared secret; when set, the REST API and MCP HTTP endpoint require `Authorization: Bearer <token>`. */
   apiToken: process.env.API_TOKEN || undefined,
+  /** Bearer secret for GET /api/cron/refresh. Vercel Cron sends it automatically when set. */
+  cronSecret: process.env.CRON_SECRET || undefined,
   /** Run the ingestion scheduler inside the API process. */
   ingestInProcess: bool('INGEST_IN_PROCESS', true),
   fetchCron: process.env.FETCH_CRON ?? '*/15 * * * *',

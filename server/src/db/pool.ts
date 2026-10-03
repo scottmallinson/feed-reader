@@ -7,7 +7,7 @@ pg.types.setTypeParser(pg.types.builtins.INT8, (v) => v);
 let pool: pg.Pool | undefined;
 
 export function getPool(): pg.Pool {
-  pool ??= new pg.Pool({ connectionString: config.databaseUrl, max: 10 });
+  pool ??= new pg.Pool({ connectionString: config.databaseUrl, max: config.poolMax });
   return pool;
 }
 

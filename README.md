@@ -30,6 +30,34 @@ open http://localhost:3000
 Follow a feed from the sidebar (for example `https://rss.arxiv.org/rss/cs.CL` or
 `https://www.reddit.com/r/LocalAI/.rss`). It is fetched right away and then every 15 minutes.
 
+## Deploy to Vercel
+
+The repo deploys to Vercel as-is (`vercel.json`). The web UI is served as static files, and the
+REST API, `/mcp` and the refresh endpoint run as a single Vercel Function
+(`api/index.mjs` → `server/src/vercel.ts`). Migrations run automatically on the first request.
+
+1. Import the GitHub repo as a new Vercel project (keep the default settings; `vercel.json`
+   supplies the build).
+2. Add a database: **Storage → Create Database → Neon** (the free plan is enough) and connect
+   it to the project. The integration sets `DATABASE_URL`, which the app uses (it also accepts
+   `POSTGRES_URL`).
+3. Set these environment variables:
+   - `API_TOKEN`: **required.** The deployment refuses API and MCP requests without it. The
+     web UI asks for it once and keeps it in the browser.
+   - `CRON_SECRET`: a random string. Vercel Cron sends it to `/api/cron/refresh`.
+4. Redeploy.
+
+Feeds refresh when you add them, when you press refresh in the UI, and on a schedule:
+
+- **Vercel Cron** calls `GET /api/cron/refresh` once a day (06:00 UTC), the most the Hobby plan
+  allows. On Pro you can change the schedule in `vercel.json` to `*/15 * * * *`.
+- **GitHub Actions** (`.github/workflows/refresh-feeds.yml`) can call it every 30 minutes. Set the
+  repository variable `FEED_READER_URL` (for example `https://your-app.vercel.app`) and the
+  repository secret `CRON_SECRET` to enable it.
+
+MCP clients connect to `https://your-app.vercel.app/mcp` with `Authorization: Bearer <API_TOKEN>`,
+for example `npx mcp-remote https://your-app.vercel.app/mcp --header "Authorization: Bearer <API_TOKEN>"`.
+
 ## Local development
 
 Requires Node 20+ and PostgreSQL 14+.
