@@ -54,6 +54,13 @@ differ only by `http`/`https`, a leading `www.`, letter case in the host, a trai
 fragment. Imported feeds are fetched straight away in the background. Feeds and boards are listed
 alphabetically.
 
+To fix a feed whose address has changed, or to rename it, hover over it in the sidebar and click
+**✎** (or the red **!** shown when its last fetch failed). You can enter a new feed URL or the
+site's address, give the feed your own name (leave it blank to use the feed's own title) and move
+it to another board. A new address is fetched straight away, so you can see whether it works.
+Your subscription keeps its board, name and read state; if someone else follows the old address,
+only your subscription moves.
+
 ## Deploy to Vercel
 
 The repo deploys to Vercel as-is (`vercel.json`). The web UI is served as static files, and the
@@ -217,7 +224,7 @@ All routes are under `/api` and accept or return JSON. When `API_TOKEN` is set t
 | `GET`    | `/feeds`                | Subscriptions with unread counts and last fetch status |
 | `POST`   | `/feeds`                | `{ url, board_id? }`: subscribes and fetches right away. A web page's URL is replaced by the feed it advertises; `422` if it has none |
 | `POST`   | `/opml`                 | Import subscriptions: an OPML body (`text/xml` or `text/x-opml`) or `{ opml }`. Returns `added`, `skipped` (with `reason`), `boardsCreated` and `invalid`; `400` for a file that isn't OPML |
-| `PATCH`  | `/feeds/:id`            | `{ board_id }` |
+| `PATCH`  | `/feeds/:id`            | Any of `{ url, title, board_id }`. `url` may be a site's address (feed discovery) and is fetched straight away (`refresh` in the response); `409` if you already follow that feed. `title: null` restores the feed's own title |
 | `DELETE` | `/feeds/:id`            | Unsubscribe |
 | `POST`   | `/feeds/:id/refresh`    | Fetch one feed now |
 | `POST`   | `/refresh`              | Run a full ingestion pass and return a summary |

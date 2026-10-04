@@ -254,6 +254,79 @@ describe('OPML import', () => {
   });
 });
 
+describe('editing feeds', () => {
+  it('fixes an outdated feed address in place, keeping the subscription', async () => {
+    const id = await repo.subscribe(USER, `${fixtures.base}/gone/feed.xml`, boardId);
+    expect((await refreshFeed(id)).error).toMatch(/HTTP 404/);
+
+    const res = await request(app).patch(`/api/feeds/${id}`).send({ url: `${fixtures.base}/site/feed.xml` }).expect(200);
+    expect(res.body).toMatchObject({ id, url: `${fixtures.base}/site/feed.xml`, last_error: null, board_id: boardId });
+    expect(res.body.refresh).toMatchObject({ inserted: 2 });
+    expect(res.body.refresh.error).toBeUndefined();
+    await repo.unsubscribe(USER, id);
+  });
+
+  it('accepts a website address and uses the feed it advertises', async () => {
+    const id = await repo.subscribe(USER, `${fixtures.base}/gone/feed.xml`);
+    const res = await request(app).patch(`/api/feeds/${id}`).send({ url: `${fixtures.base}/site/` }).expect(200);
+    expect(res.body.url).toBe(`${fixtures.base}/site/feed.xml`);
+    await repo.unsubscribe(USER, id);
+  });
+
+  it('refuses an address the user already follows (409), including URL variants', async () => {
+    const id = await repo.subscribe(USER, `${fixtures.base}/gone/feed.xml`);
+    const arxiv = (await repo.listFeeds(USER)).find((f) => f.url.endsWith('/arxiv.xml'))!;
+    const res = await request(app).patch(`/api/feeds/${id}`).send({ url: `${arxiv.url}/` }).expect(409);
+    expect(res.body.error).toMatch(/Already subscribed/);
+    expect(await repo.getFeedUrl(id)).toBe(`${fixtures.base}/gone/feed.xml`);
+    await repo.unsubscribe(USER, id);
+  });
+
+  it('moves only this user to the new address when the feed is shared', async () => {
+    const OTHER = 2;
+    await repo.ensureUser(OTHER);
+    const id = await repo.subscribe(USER, `${fixtures.base}/gone/feed.xml`, boardId);
+    expect(await repo.subscribe(OTHER, `${fixtures.base}/gone/feed.xml`)).toBe(id);
+    await repo.setFeedTitle(USER, id, 'My name');
+
+    const res = await request(app).patch(`/api/feeds/${id}`).send({ url: `${fixtures.base}/feed` }).expect(200);
+    expect(res.body.id).not.toBe(id);
+    expect(res.body).toMatchObject({ url: `${fixtures.base}/feed`, board_id: boardId, title: 'My name' });
+    expect((await repo.listFeeds(USER)).some((f) => f.id === id)).toBe(false);
+    // The other user still follows the old address, untouched.
+    expect((await repo.listFeeds(OTHER)).map((f) => [f.id, f.url])).toEqual([[id, `${fixtures.base}/gone/feed.xml`]]);
+
+    await repo.unsubscribe(USER, res.body.id);
+    await repo.unsubscribe(OTHER, id);
+  });
+
+  it('renames a feed; the custom name survives refreshes and can be cleared', async () => {
+    const arxiv = (await repo.listFeeds(USER)).find((f) => f.url.endsWith('/arxiv.xml'))!;
+    const res = await request(app).patch(`/api/feeds/${arxiv.id}`).send({ title: '  Papers  ' }).expect(200);
+    expect(res.body).toMatchObject({ title: 'Papers', custom_title: 'Papers', feed_title: 'cs.CL updates on arXiv.org' });
+    expect(res.body.refresh).toBeUndefined();
+
+    await refreshFeed(arxiv.id);
+    expect((await repo.getFeed(USER, arxiv.id)).title).toBe('Papers');
+    const [item] = await repo.listItems(USER, { feedId: arxiv.id, limit: 1 });
+    expect(item.feed_title).toBe('Papers');
+    expect(await repo.searchItems(USER, { feedNames: ['Papers'] })).not.toHaveLength(0);
+
+    const cleared = await request(app).patch(`/api/feeds/${arxiv.id}`).send({ title: null }).expect(200);
+    expect(cleared.body).toMatchObject({ title: 'cs.CL updates on arXiv.org', custom_title: null });
+  });
+
+  it('validates edits', async () => {
+    const arxiv = (await repo.listFeeds(USER)).find((f) => f.url.endsWith('/arxiv.xml'))!;
+    await request(app).patch(`/api/feeds/${arxiv.id}`).send({}).expect(400);
+    await request(app).patch(`/api/feeds/${arxiv.id}`).send({ url: 'not a url' }).expect(400);
+    await request(app).patch('/api/feeds/99999').send({ title: 'x' }).expect(404);
+    // Setting the same URL is a no-op.
+    const same = await request(app).patch(`/api/feeds/${arxiv.id}`).send({ url: arxiv.url }).expect(200);
+    expect(same.body.id).toBe(arxiv.id);
+  });
+});
+
 describe('deployment hardening', () => {
   it('re-running migrations is a no-op', async () => {
     const logs: string[] = [];
@@ -356,6 +429,15 @@ describe('MCP server', () => {
     expect(after.count).toBe(0);
 
     await repo.markItemsRead(USER, ids, false);
+  });
+
+  it('lists the newest items when search_feed_items has no keyword', async () => {
+    const result = await client.callTool({ name: 'search_feed_items', arguments: { feed_name: 'arxiv', limit: 5 } });
+    expect(result.isError).toBeFalsy();
+    const listing = JSON.parse(text(result));
+    expect(listing.count).toBeGreaterThan(0);
+    const dates = listing.items.map((i: { published_date: string | null }) => i.published_date ?? '');
+    expect(dates).toEqual([...dates].sort().reverse());
   });
 
   it('returns a tool error for unknown articles', async () => {

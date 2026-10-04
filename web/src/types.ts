@@ -11,7 +11,10 @@ export interface Board {
 export interface Feed {
   id: number;
   url: string;
+  /** Display name: the custom title if set, otherwise the feed's own. */
   title: string | null;
+  feed_title: string | null;
+  custom_title: string | null;
   slug: string | null;
   site_url: string | null;
   last_fetched: string | null;

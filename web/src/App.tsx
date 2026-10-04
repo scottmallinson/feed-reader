@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, ApiError, setToken, type ItemQuery } from './api';
 import { describeImport } from './importSummary';
 import { ArticleView } from './components/ArticleView';
+import { FeedEditor } from './components/FeedEditor';
 import { ItemList } from './components/ItemList';
 import { Sidebar } from './components/Sidebar';
 import type { Board, Feed, Item, ReadStatus, Selection, ViewMode } from './types';
@@ -48,6 +49,7 @@ export function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [editingFeed, setEditingFeed] = useState<Feed | null>(null);
   const [needsToken, setNeedsToken] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -253,6 +255,7 @@ export function App() {
           if (selection.type === 'feed' && selection.id === feed.id) select({ type: 'all' });
           await Promise.all([loadSidebar(), loadItems(false)]);
         }}
+        onEditFeed={setEditingFeed}
         onMoveFeed={async (feed, boardId) => {
           await api.setFeedBoard(feed.id, boardId).catch(handleError);
           await loadSidebar();
@@ -370,6 +373,26 @@ export function App() {
         )}
       </main>
 
+      {editingFeed && (
+        <FeedEditor
+          feed={editingFeed}
+          boards={boards}
+          onClose={() => setEditingFeed(null)}
+          onSave={async (patch) => {
+            const updated = await api.updateFeed(editingFeed.id, patch);
+            // Changing the address can move the subscription to a different feed id.
+            if (selection.type === 'feed' && selection.id === editingFeed.id && updated.id !== editingFeed.id) {
+              select({ type: 'feed', id: updated.id });
+            }
+            await Promise.all([loadSidebar(), loadItems(false)]);
+            if (updated.refresh?.error) {
+              setEditingFeed(updated);
+              return updated.refresh.error;
+            }
+            return null;
+          }}
+        />
+      )}
       {openItem && (
         <ArticleView
           item={openItem}
