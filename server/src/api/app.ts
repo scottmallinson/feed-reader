@@ -32,7 +32,16 @@ const listQuery = z.object({
 
 const opmlBody = z.object({ opml: z.string().min(1) });
 const subscribeBody = z.object({ url: z.url(), board_id: id.nullable().optional() });
-const feedPatch = z.object({ board_id: id.nullable() });
+const feedPatch = z
+  .object({
+    board_id: id.nullable().optional(),
+    url: z.url().optional(),
+    // A custom display name; null or "" restores the feed's own title.
+    title: z.string().trim().max(200).nullable().optional(),
+  })
+  .refine((p) => p.board_id !== undefined || p.url !== undefined || p.title !== undefined, {
+    message: 'Nothing to update',
+  });
 const boardBody = z.object({ name: z.string().trim().min(1).max(100) });
 const itemPatch = z.object({
   is_read: z.boolean().optional(),
@@ -125,9 +134,23 @@ export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
     },
   );
   api.patch('/feeds/:id', async (req, res) => {
-    const feedId = id.parse(req.params.id);
-    await repo.setFeedBoard(userId, feedId, feedPatch.parse(req.body).board_id);
-    res.json(await repo.getFeed(userId, feedId));
+    let feedId = id.parse(req.params.id);
+    const patch = feedPatch.parse(req.body);
+    await repo.getFeed(userId, feedId);
+    let refresh: Awaited<ReturnType<typeof refreshFeed>> | undefined;
+    if (patch.url !== undefined) {
+      // Same rules as following: a site's address resolves to the feed it advertises.
+      const feedUrl = await resolveFeedUrl(patch.url);
+      const before = feedId;
+      feedId = await repo.changeFeedUrl(userId, feedId, feedUrl);
+      // Fetch straight away so the user sees whether the new address works.
+      if (feedId !== before || (await repo.getFeed(userId, feedId)).last_fetched === null) {
+        refresh = await refreshFeed(feedId);
+      }
+    }
+    if (patch.title !== undefined) await repo.setFeedTitle(userId, feedId, patch.title);
+    if (patch.board_id !== undefined) await repo.setFeedBoard(userId, feedId, patch.board_id);
+    res.json({ ...(await repo.getFeed(userId, feedId)), ...(refresh ? { refresh } : {}) });
   });
   api.delete('/feeds/:id', async (req, res) => {
     await repo.unsubscribe(userId, id.parse(req.params.id));
@@ -213,6 +236,8 @@ export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
       res.status(400).json({ error: err.message });
     } else if (err instanceof NoFeedFoundError) {
       res.status(422).json({ error: err.message });
+    } else if (err instanceof repo.ConflictError) {
+      res.status(409).json({ error: err.message });
     } else if (err instanceof repo.NotFoundError) {
       res.status(404).json({ error: err.message });
     } else if (err instanceof TypeError && /Invalid URL/i.test(err.message)) {

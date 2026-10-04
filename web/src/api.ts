@@ -80,6 +80,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ url, board_id }),
     }),
+  updateFeed: (id: number, patch: { url?: string; title?: string | null; board_id?: number | null }) =>
+    request<Feed & { refresh?: { inserted: number; error?: string } }>(`/feeds/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
   setFeedBoard: (id: number, board_id: number | null) =>
     request<Feed>(`/feeds/${id}`, { method: 'PATCH', body: JSON.stringify({ board_id }) }),
   importOpml: (opml: string) =>

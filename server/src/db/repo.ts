@@ -14,7 +14,11 @@ export interface Board {
 export interface FeedSubscription {
   id: number;
   url: string;
+  /** Display name: the user's custom title if set, otherwise the feed's own title. */
   title: string | null;
+  /** The title the feed itself publishes. */
+  feed_title: string | null;
+  custom_title: string | null;
   slug: string | null;
   site_url: string | null;
   last_fetched: Date | null;
@@ -55,7 +59,7 @@ export interface NewItem {
 export class NotFoundError extends Error {}
 
 const ITEM_COLUMNS = `
-  i.id, i.feed_id, f.title AS feed_title, i.url, i.headline, i.author, i.summary,
+  i.id, i.feed_id, coalesce(s.custom_title, f.title) AS feed_title, i.url, i.headline, i.author, i.summary,
   i.thumbnail_url, i.published_date,
   coalesce(ui.is_read, false) AS is_read,
   coalesce(ui.is_saved, false) AS is_saved,
@@ -131,13 +135,14 @@ export async function getBoardBySlug(userId: number, slug: string): Promise<Boar
 
 export async function listFeeds(userId: number): Promise<FeedSubscription[]> {
   const { rows } = await query<FeedSubscription>(
-    `SELECT f.id, f.url, f.title, f.slug, f.site_url, f.last_fetched, f.last_error, s.board_id,
+    `SELECT f.id, f.url, coalesce(s.custom_title, f.title) AS title, f.title AS feed_title,
+       s.custom_title, f.slug, f.site_url, f.last_fetched, f.last_error, s.board_id,
        (SELECT count(*)::int FROM items i
           LEFT JOIN user_items ui ON ui.item_id = i.id AND ui.user_id = $1
          WHERE i.feed_id = f.id AND NOT coalesce(ui.is_read, false)) AS unread_count
      FROM subscriptions s JOIN feeds f ON f.id = s.feed_id
      WHERE s.user_id = $1
-     ORDER BY lower(coalesce(f.title, f.url))`,
+     ORDER BY lower(coalesce(s.custom_title, f.title, f.url))`,
     [userId],
   );
   return rows;
@@ -260,6 +265,71 @@ export async function setFeedBoard(userId: number, feedId: number, boardId: numb
     [userId, feedId, boardId],
   );
   if (r.rowCount === 0) throw new NotFoundError('Feed not found');
+}
+
+export class ConflictError extends Error {}
+
+/** Sets (or, with null/blank, clears) the user's own display name for a feed. */
+export async function setFeedTitle(userId: number, feedId: number, title: string | null) {
+  const r = await query(
+    `UPDATE subscriptions SET custom_title = $3 WHERE user_id = $1 AND feed_id = $2`,
+    [userId, feedId, title?.trim() || null],
+  );
+  if (r.rowCount === 0) throw new NotFoundError('Feed not found');
+}
+
+/**
+ * Points the user's subscription at a new feed URL and returns the (possibly new) feed id.
+ * - If the user already follows that feed (by feedKey), throws ConflictError.
+ * - If another feed row already has that URL, the subscription moves to it.
+ * - If other users follow the current feed, the subscription moves to a new feed row so their
+ *   subscriptions are untouched; otherwise the feed is updated in place, keeping its items and
+ *   read state.
+ * The board and custom title travel with the subscription.
+ */
+export async function changeFeedUrl(userId: number, feedId: number, url: string): Promise<number> {
+  const normalized = new URL(url).toString();
+  const key = feedKey(normalized);
+  const current = await getFeed(userId, feedId); // visibility check
+  if (feedKey(current.url) === key && current.url === normalized) return feedId;
+
+  const mine = (await listFeeds(userId)).find((f) => f.id !== feedId && feedKey(f.url) === key);
+  if (mine) throw new ConflictError(`Already subscribed to ${mine.url} (${mine.title ?? 'untitled'})`);
+
+  const { rows: candidates } = await query<{ id: number; url: string }>(
+    'SELECT id, url FROM feeds WHERE id <> $1 AND url ILIKE $2',
+    [feedId, `%${escapeLike(key.split('/')[0])}%`],
+  );
+  let targetId = candidates.find((f) => feedKey(f.url) === key)?.id;
+
+  const { rows: others } = await query<{ n: number }>(
+    'SELECT count(*)::int AS n FROM subscriptions WHERE feed_id = $1 AND user_id <> $2',
+    [feedId, userId],
+  );
+  if (targetId === undefined && others[0].n === 0) {
+    // Sole subscriber: update in place and clear the old fetch state.
+    await query(
+      `UPDATE feeds SET url = $2, last_error = NULL, last_fetched = NULL WHERE id = $1`,
+      [feedId, normalized],
+    );
+    return feedId;
+  }
+  if (targetId === undefined) {
+    const { rows } = await query<{ id: number }>(
+      `INSERT INTO feeds (url, title) VALUES ($1, $2) RETURNING id`,
+      [normalized, current.feed_title],
+    );
+    targetId = rows[0].id;
+  }
+  // Move the subscription, keeping its board and custom title.
+  await query(
+    `INSERT INTO subscriptions (user_id, feed_id, board_id, custom_title)
+     SELECT user_id, $3, board_id, custom_title FROM subscriptions WHERE user_id = $1 AND feed_id = $2
+     ON CONFLICT (user_id, feed_id) DO NOTHING`,
+    [userId, feedId, targetId],
+  );
+  await unsubscribe(userId, feedId);
+  return targetId;
 }
 
 export async function unsubscribe(userId: number, feedId: number): Promise<void> {
@@ -518,7 +588,8 @@ export async function searchItems(userId: number, opts: SearchOptions): Promise<
     return `$${values.length}`;
   };
   const where: string[] = [];
-  let rank = '0';
+  // Relevance ordering only applies to keyword searches (a bare `ORDER BY 0` is a column position).
+  let rank = '';
   const keyword = opts.keyword?.trim();
   if (keyword) {
     const q = `websearch_to_tsquery('english', ${param(keyword)})`;
@@ -531,7 +602,7 @@ export async function searchItems(userId: number, opts: SearchOptions): Promise<
     // Loose match against title, slug and URL so "Arxiv" or "r/LocalAI" find the right feed.
     const p = param(names.map((n) => `%${escapeLike(n)}%`));
     where.push(
-      `(f.title ILIKE ANY(${p}) OR f.url ILIKE ANY(${p}) OR f.slug ILIKE ANY(${p}))`,
+      `(f.title ILIKE ANY(${p}) OR s.custom_title ILIKE ANY(${p}) OR f.url ILIKE ANY(${p}) OR f.slug ILIKE ANY(${p}))`,
     );
   }
   if (opts.boardSlug) {
@@ -549,7 +620,7 @@ export async function searchItems(userId: number, opts: SearchOptions): Promise<
   const { rows } = await query<ItemRow>(
     `SELECT ${ITEM_COLUMNS} ${ITEM_FROM}
      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-     ORDER BY ${rank} DESC, ${SORT_DATE} DESC, i.id DESC
+     ORDER BY ${rank ? `${rank} DESC, ` : ''}${SORT_DATE} DESC, i.id DESC
      LIMIT ${param(limit)}`,
     values,
   );

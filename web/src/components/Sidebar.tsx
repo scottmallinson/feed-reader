@@ -14,6 +14,7 @@ interface Props {
   onDeleteBoard: (board: Board) => void;
   onUnsubscribe: (feed: Feed) => void;
   onMoveFeed: (feed: Feed, boardId: number | null) => void;
+  onEditFeed: (feed: Feed) => void;
 }
 
 function same(a: Selection, b: Selection) {
@@ -92,10 +93,18 @@ export function Sidebar(props: Props) {
       f.unread_count,
       <span className="row-tools">
         {f.last_error && (
-          <span className="warn" title={`Last fetch failed: ${f.last_error}`}>
+          <button
+            type="button"
+            className="icon-btn small warn"
+            title={`Last fetch failed: ${f.last_error}. Click to edit the feed.`}
+            onClick={() => props.onEditFeed(f)}
+          >
             !
-          </span>
+          </button>
         )}
+        <button type="button" className="icon-btn small" title="Edit feed" onClick={() => props.onEditFeed(f)}>
+          ✎
+        </button>
         <select
           aria-label="Move to board"
           title="Move to board"
