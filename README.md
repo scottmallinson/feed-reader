@@ -89,6 +89,10 @@ Feeds refresh when you add them, when you press refresh in the UI, and on a sche
 MCP clients connect to `https://your-app.vercel.app/mcp` with `Authorization: Bearer <API_TOKEN>`,
 for example `npx mcp-remote https://your-app.vercel.app/mcp --header "Authorization: Bearer <API_TOKEN>"`.
 
+Claude's custom connectors (claude.ai / the Claude apps) cannot send an `Authorization` header, so
+they will fail with "Couldn't reach" against `/mcp`. Add the connector with the token in the URL
+instead: `https://your-app.vercel.app/mcp/<API_TOKEN>`. Treat that URL as a secret.
+
 ## Local development
 
 Requires Node 20+ and PostgreSQL 14+.

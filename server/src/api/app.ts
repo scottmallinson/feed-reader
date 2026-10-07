@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -68,6 +69,14 @@ function requireToken(req: Request, res: Response, next: NextFunction) {
     return next();
   }
   if (bearer(req) === config.apiToken) return next();
+  res.status(401).json({ error: 'Unauthorized' });
+}
+
+function requireUrlToken(req: Request, res: Response, next: NextFunction) {
+  if (!config.apiToken) return requireToken(req, res, next);
+  const given = Buffer.from(String(req.params.token ?? ''));
+  const expected = Buffer.from(config.apiToken);
+  if (given.length === expected.length && timingSafeEqual(given, expected)) return next();
   res.status(401).json({ error: 'Unauthorized' });
 }
 
@@ -218,6 +227,9 @@ export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
 
   // Streamable HTTP MCP endpoint, so remote/HTTP MCP clients can share the API's port.
   app.all('/mcp', requireToken, mcpHttpHandler(userId));
+  // Claude's custom connectors cannot send an Authorization header, so the token may instead be
+  // the last path segment: https://host/mcp/<API_TOKEN>.
+  app.all('/mcp/:token', requireUrlToken, mcpHttpHandler(userId));
 
   // Serve the built web app when it is available.
   const webDistOption = opts.webDistDir ?? config.webDistDir;
