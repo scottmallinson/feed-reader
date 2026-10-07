@@ -101,7 +101,7 @@ export async function processPendingBookmarks(
       result[await processBookmark(next)]++;
     }
   };
-  await Promise.all(Array.from({ length: config.fetchConcurrency }, worker));
+  await Promise.all(Array.from({ length: config.bookmarkConcurrency }, worker));
 
   result.remaining = await repo.countPendingBookmarks();
   const done = result.fetched + result.dead + result.retry;
@@ -109,6 +109,9 @@ export async function processPendingBookmarks(
     log(
       `bookmarks: ${result.fetched} fetched, ${result.dead} dead, ${result.retry} to retry, ${result.remaining} remaining`,
     );
+  }
+  if (done === 0 && result.remaining > 0) {
+    log(`bookmarks: ${result.remaining} pending, none due yet (waiting to retry after a failure)`);
   }
   if (done > 0 && result.remaining === 0) await logDeadLinks(log);
   return result;

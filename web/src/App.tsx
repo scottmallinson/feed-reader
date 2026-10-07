@@ -106,19 +106,41 @@ export function App() {
     void loadSidebar();
   }, [loadSidebar]);
 
-  // Imported bookmarks are fetched in the background: show progress, and refresh while it runs.
-  const bookmarksPending = bookmarkReport?.pending ?? 0;
+  // Imported bookmarks wait for their article text. While any are pending and the page is open,
+  // ask the server for batch after batch (it works through them newest first); when none are due
+  // (a failed fetch waiting to be retried) check again every 30 seconds.
+  const bookmarksPending = (bookmarkReport?.pending ?? 0) > 0;
+  const bookmarksLoaded = bookmarkReport !== null;
+  const fetchingBookmarks = useRef(false);
   useEffect(() => {
-    if (bookmarkReport === null) {
+    if (!bookmarksLoaded) {
       api.bookmarkReport().then(setBookmarkReport, () => {});
       return;
     }
-    if (bookmarksPending === 0) return;
-    const timer = setInterval(() => {
-      api.bookmarkReport().then(setBookmarkReport, () => {});
-    }, 15000);
-    return () => clearInterval(timer);
-  }, [bookmarkReport === null, bookmarksPending]);
+    if (!bookmarksPending) return;
+    let cancelled = false;
+    const run = async () => {
+      if (fetchingBookmarks.current) return;
+      fetchingBookmarks.current = true;
+      try {
+        while (!cancelled) {
+          const r = await api.fetchBookmarks();
+          setBookmarkReport(r.report);
+          if (r.remaining === 0 || r.fetched + r.dead + r.retry === 0) break;
+        }
+      } catch {
+        // offline or unauthorized: the next tick tries again
+      } finally {
+        fetchingBookmarks.current = false;
+      }
+    };
+    void run();
+    const timer = setInterval(() => void run(), 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [bookmarksLoaded, bookmarksPending]);
 
   useEffect(() => {
     void loadItems(false);

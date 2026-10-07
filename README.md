@@ -59,9 +59,13 @@ To bring over saved articles, use **Import bookmarks…** with a Netscape bookma
 ignored) under an "Imported bookmarks" feed; links that match an article already in one of your
 feeds are just marked saved, and repeats are skipped, so re-importing is safe. Imported links are
 marked read, so they don't inflate your unread counts, and are dated by when you saved them.
-Article text is fetched lazily in the background, most recently saved first: right after the import
-(when the server isn't on Vercel) and a slice on every scheduled refresh (`BOOKMARK_BATCH` per
-pass). A link that returns a 4xx (404, 410, 403…) or whose host no longer exists is marked dead
+Article text is fetched lazily in the background, most recently saved first. A server that stays
+up keeps going right after the import. On Vercel the page does the driving: while links are pending
+and the web UI is open it asks `POST /api/bookmarks/fetch` for one time-boxed batch after another
+(`BOOKMARK_REQUEST_MS`, `BOOKMARK_CONCURRENCY` pages at once), so a few thousand links take well
+under an hour. When the page is closed, every scheduled refresh also fetches a batch first, before
+refreshing feeds (up to `BOOKMARK_BATCH` links within `BOOKMARK_BUDGET_MS`), and
+`GET /api/cron/bookmarks` fetches a batch on its own for schedulers. A link that returns a 4xx (404, 410, 403…) or whose host no longer exists is marked dead
 straight away; timeouts and 5xx errors are retried after `BOOKMARK_RETRY_MINUTES` and marked dead
 after `BOOKMARK_MAX_ATTEMPTS` tries. When nothing is left to fetch the server logs the dead links,
 and the sidebar lists them under **Dead links** (also at `GET /api/bookmarks/report`). Dead links
@@ -237,12 +241,14 @@ All routes are under `/api` and accept or return JSON. When `API_TOKEN` is set t
 | `GET`    | `/feeds`                | Subscriptions with unread counts and last fetch status |
 | `POST`   | `/feeds`                | `{ url, board_id? }`: subscribes and fetches right away. A web page's URL is replaced by the feed it advertises; `422` if it has none |
 | `POST`   | `/bookmarks`            | Import a Netscape bookmarks file (`text/html` body or `{ html }`) into the saved list. Returns `imported`, `matchedExisting`, `alreadySaved`, `duplicates`, `invalid` and a `report`; `400` for a file with no links |
+| `POST`   | `/bookmarks/fetch`      | Fetch one time-boxed batch of pending bookmarks (newest first). Returns `fetched`, `dead`, `retry`, `remaining` and the `report` |
 | `GET`    | `/bookmarks/report`     | Background fetch progress for imported bookmarks: `total`, `pending`, `fetched` and the `dead` links with their errors |
 | `POST`   | `/opml`                 | Import subscriptions: an OPML body (`text/xml` or `text/x-opml`) or `{ opml }`. Returns `added`, `skipped` (with `reason`), `boardsCreated` and `invalid`; `400` for a file that isn't OPML |
 | `PATCH`  | `/feeds/:id`            | Any of `{ url, title, board_id }`. `url` may be a site's address (feed discovery) and is fetched straight away (`refresh` in the response); `409` if you already follow that feed. `title: null` restores the feed's own title |
 | `DELETE` | `/feeds/:id`            | Unsubscribe |
 | `POST`   | `/feeds/:id/refresh`    | Fetch one feed now |
 | `POST`   | `/refresh`              | Run a full ingestion pass and return a summary |
+| `GET`    | `/cron/bookmarks`       | Fetch one batch of pending bookmarks; same authentication as `/cron/refresh` |
 | `GET`    | `/cron/refresh`         | Same, for schedulers. Accepts `CRON_SECRET` or `API_TOKEN` as the bearer token (open when neither is set, except on Vercel) |
 | `GET`    | `/items`                | `feed_id`, `board_id`, `status`, `saved`, `content` (include HTML), `q` (full-text), `limit`, `offset` |
 | `GET`    | `/items/:id`            | Includes `full_content` |

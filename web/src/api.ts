@@ -22,6 +22,14 @@ export interface BookmarkReport {
   dead: DeadBookmark[];
 }
 
+export interface BookmarkFetchResult {
+  fetched: number;
+  dead: number;
+  retry: number;
+  remaining: number;
+  report: BookmarkReport;
+}
+
 export interface BookmarkImportResult {
   imported: number;
   matchedExisting: number;
@@ -116,6 +124,7 @@ export const api = {
   importBookmarks: (html: string) =>
     request<BookmarkImportResult>('/bookmarks', { method: 'POST', body: JSON.stringify({ html }) }),
   bookmarkReport: () => request<BookmarkReport>('/bookmarks/report'),
+  fetchBookmarks: () => request<BookmarkFetchResult>('/bookmarks/fetch', { method: 'POST' }),
   unsubscribe: (id: number) => request<void>(`/feeds/${id}`, { method: 'DELETE' }),
   refreshFeed: (id: number) =>
     request<{ inserted: number; error?: string }>(`/feeds/${id}/refresh`, { method: 'POST' }),

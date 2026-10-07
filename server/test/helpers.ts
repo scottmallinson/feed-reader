@@ -51,7 +51,7 @@ export async function startFixtureServer() {
       res.writeHead(200, { 'content-type': 'application/pdf' }).end('%PDF-1.4');
       return;
     }
-    const route = routes[req.url ?? ''];
+    const route = routes[(req.url ?? '').split('?')[0]];
     if (!route) {
       res.writeHead(404).end('not found');
       return;

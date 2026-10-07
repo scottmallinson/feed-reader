@@ -6,7 +6,7 @@ import { config } from '../config.js';
 import * as repo from '../db/repo.js';
 import { NoFeedFoundError, resolveFeedUrl } from '../ingest/discover.js';
 import { BookmarksParseError, parseBookmarks } from '../ingest/bookmarks.js';
-import { drainPendingBookmarks } from '../ingest/bookmark-fetch.js';
+import { drainPendingBookmarks, processPendingBookmarks } from '../ingest/bookmark-fetch.js';
 import { OpmlParseError, parseOpml } from '../ingest/opml.js';
 import { refreshFeed } from '../ingest/ingest.js';
 import { runIngestion } from '../ingest/scheduler.js';
@@ -110,6 +110,16 @@ export function createApp(opts: AppOptions = {}) {
     res.json({ summary: await runIngestion() });
   });
 
+  // Fetches one time-boxed batch of imported bookmarks, for schedulers that want it on its own.
+  app.get('/api/cron/bookmarks', requireCronAuth, async (_req, res) => {
+    res.json({
+      bookmarks: await processPendingBookmarks({
+        budgetMs: config.bookmarkRequestMs,
+        limit: config.bookmarkBatch,
+      }),
+    });
+  });
+
   const api = express.Router();
   api.use(requireToken);
 
@@ -162,6 +172,15 @@ export function createApp(opts: AppOptions = {}) {
       res.json({ ...result, duplicates, invalid, report: await repo.bookmarkReport(userId) });
     },
   );
+  // Fetches one time-boxed batch of pending bookmarks (newest first). The web UI calls this in a
+  // loop while links are pending, which is how a serverless deployment catches up quickly.
+  api.post('/bookmarks/fetch', async (_req, res) => {
+    const batch = await processPendingBookmarks({
+      budgetMs: config.bookmarkRequestMs,
+      limit: config.bookmarkBatch,
+    });
+    res.json({ ...batch, report: await repo.bookmarkReport(userId) });
+  });
   // Fetch progress for imported bookmarks, including the links found to be dead.
   api.get('/bookmarks/report', async (_req, res) => {
     res.json(await repo.bookmarkReport(userId));

@@ -38,10 +38,14 @@ export const config = {
   extractFullArticles: bool('EXTRACT_FULL_ARTICLES', true),
   /** Items whose feed content is shorter than this (in characters of text) get Readability extraction. */
   extractMinChars: int('EXTRACT_MIN_CHARS', 600),
-  /** Imported bookmarks fetched per scheduled pass (most recently saved first). */
-  bookmarkBatch: int('BOOKMARK_BATCH', 40),
+  /** Most imported bookmarks fetched per scheduled pass (newest first); the time budget usually bites first. */
+  bookmarkBatch: int('BOOKMARK_BATCH', 200),
   /** Stop starting new bookmark fetches in a scheduled pass after this long. */
   bookmarkBudgetMs: int('BOOKMARK_BUDGET_MS', 45000),
+  /** Same, for one POST /api/bookmarks/fetch request (the web UI calls it repeatedly). */
+  bookmarkRequestMs: int('BOOKMARK_REQUEST_MS', 55000),
+  /** Bookmark pages fetched at once; they are spread over many hosts, so this can exceed FETCH_CONCURRENCY. */
+  bookmarkConcurrency: int('BOOKMARK_CONCURRENCY', 8),
   /** Transient failures (timeouts, 5xx, ...) before a bookmark is reported as dead. */
   bookmarkMaxAttempts: int('BOOKMARK_MAX_ATTEMPTS', 3),
   /** Minutes to wait before retrying a bookmark that failed transiently. */
