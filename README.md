@@ -54,6 +54,19 @@ differ only by `http`/`https`, a leading `www.`, letter case in the host, a trai
 fragment. Imported feeds are fetched straight away in the background. Feeds and boards are listed
 alphabetically.
 
+To bring over saved articles, use **Import bookmarks…** with a Netscape bookmarks file (Feedly's
+"Saved For Later" export, or a browser's). Every link lands in your **Saved** list (folders are
+ignored) under an "Imported bookmarks" feed; links that match an article already in one of your
+feeds are just marked saved, and repeats are skipped, so re-importing is safe. Imported links are
+marked read, so they don't inflate your unread counts, and are dated by when you saved them.
+Article text is fetched lazily in the background, most recently saved first: right after the import
+(when the server isn't on Vercel) and a slice on every scheduled refresh (`BOOKMARK_BATCH` per
+pass). A link that returns a 4xx (404, 410, 403…) or whose host no longer exists is marked dead
+straight away; timeouts and 5xx errors are retried after `BOOKMARK_RETRY_MINUTES` and marked dead
+after `BOOKMARK_MAX_ATTEMPTS` tries. When nothing is left to fetch the server logs the dead links,
+and the sidebar lists them under **Dead links** (also at `GET /api/bookmarks/report`). Dead links
+stay in your saved list with the title from the export.
+
 To fix a feed whose address has changed, or to rename it, hover over it in the sidebar and click
 **✎** (or the red **!** shown when its last fetch failed). You can enter a new feed URL or the
 site's address, give the feed your own name (leave it blank to use the feed's own title) and move
@@ -223,6 +236,8 @@ All routes are under `/api` and accept or return JSON. When `API_TOKEN` is set t
 | `DELETE` | `/boards/:id`           | Its feeds stay subscribed |
 | `GET`    | `/feeds`                | Subscriptions with unread counts and last fetch status |
 | `POST`   | `/feeds`                | `{ url, board_id? }`: subscribes and fetches right away. A web page's URL is replaced by the feed it advertises; `422` if it has none |
+| `POST`   | `/bookmarks`            | Import a Netscape bookmarks file (`text/html` body or `{ html }`) into the saved list. Returns `imported`, `matchedExisting`, `alreadySaved`, `duplicates`, `invalid` and a `report`; `400` for a file with no links |
+| `GET`    | `/bookmarks/report`     | Background fetch progress for imported bookmarks: `total`, `pending`, `fetched` and the `dead` links with their errors |
 | `POST`   | `/opml`                 | Import subscriptions: an OPML body (`text/xml` or `text/x-opml`) or `{ opml }`. Returns `added`, `skipped` (with `reason`), `boardsCreated` and `invalid`; `400` for a file that isn't OPML |
 | `PATCH`  | `/feeds/:id`            | Any of `{ url, title, board_id }`. `url` may be a site's address (feed discovery) and is fetched straight away (`refresh` in the response); `409` if you already follow that feed. `title: null` restores the feed's own title |
 | `DELETE` | `/feeds/:id`            | Unsubscribe |

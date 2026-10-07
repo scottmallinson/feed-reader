@@ -1,3 +1,4 @@
+import type { Bookmark } from '../ingest/bookmarks.js';
 import { feedKey, type OpmlFeed } from '../ingest/opml.js';
 import { escapeLike, slugify } from '../lib/slug.js';
 import { getPool, query } from './pool.js';
@@ -350,10 +351,16 @@ export async function unsubscribe(userId: number, feedId: number): Promise<void>
 export async function feedsToFetch(): Promise<{ id: number; url: string }[]> {
   const { rows } = await query(
     `SELECT f.id, f.url FROM feeds f
-     WHERE EXISTS (SELECT 1 FROM subscriptions s WHERE s.feed_id = f.id)
+     WHERE f.kind = 'feed' AND EXISTS (SELECT 1 FROM subscriptions s WHERE s.feed_id = f.id)
      ORDER BY f.last_fetched NULLS FIRST`,
   );
   return rows;
+}
+
+/** Imported-bookmark pseudo feeds have no URL to poll. */
+export async function isBookmarksFeed(feedId: number): Promise<boolean> {
+  const { rows } = await query('SELECT 1 FROM feeds WHERE id = $1 AND kind = $2', [feedId, 'bookmarks']);
+  return rows.length > 0;
 }
 
 export async function getFeedUrl(feedId: number): Promise<string> {
@@ -439,6 +446,206 @@ export async function insertItems(feedId: number, items: NewItem[]): Promise<num
     inserted += r.rowCount ?? 0;
   }
   return inserted;
+}
+
+// ---------------------------------------------------------------- bookmarks
+
+export interface BookmarkImportResult {
+  /** Links new to the reader, saved and queued for background fetching. */
+  imported: number;
+  /** Links that matched an article already in the reader, which is now saved. */
+  matchedExisting: number;
+  /** Links that were already in the saved list. */
+  alreadySaved: number;
+}
+
+/** The user's pseudo feed holding imported bookmarks, created (and subscribed to) on first use. */
+async function bookmarksFeed(userId: number): Promise<number> {
+  const url = `feed-reader://bookmarks/${userId}`;
+  const existing = await query<{ id: number }>('SELECT id FROM feeds WHERE url = $1', [url]);
+  let feedId = existing.rows[0]?.id;
+  if (feedId === undefined) {
+    const slug = await uniqueSlug('imported-bookmarks', async (s) => {
+      const r = await query('SELECT 1 FROM feeds WHERE slug = $1', [s]);
+      return r.rowCount! > 0;
+    });
+    const { rows } = await query<{ id: number }>(
+      `INSERT INTO feeds (url, title, slug, kind) VALUES ($1, 'Imported bookmarks', $2, 'bookmarks')
+       ON CONFLICT (url) DO UPDATE SET kind = 'bookmarks' RETURNING id`,
+      [url, slug],
+    );
+    feedId = rows[0].id;
+  }
+  await query(
+    `INSERT INTO subscriptions (user_id, feed_id) VALUES ($1, $2) ON CONFLICT (user_id, feed_id) DO NOTHING`,
+    [userId, feedId],
+  );
+  return feedId;
+}
+
+/**
+ * Saves imported bookmarks. A link matching an article the user can already see is just marked
+ * saved; the rest become items in the bookmarks feed, saved and marked read (they are an archive,
+ * not new reading), with their article text left to be fetched in the background. Safe to repeat.
+ */
+export async function importBookmarks(
+  userId: number,
+  bookmarks: Bookmark[],
+): Promise<BookmarkImportResult> {
+  const result: BookmarkImportResult = { imported: 0, matchedExisting: 0, alreadySaved: 0 };
+  if (bookmarks.length === 0) return result;
+  const feedId = await bookmarksFeed(userId);
+  const CHUNK = 500;
+
+  for (let i = 0; i < bookmarks.length; i += CHUNK) {
+    const chunk = bookmarks.slice(i, i + CHUNK);
+    const urls = chunk.map((b) => b.url);
+    const { rows: known } = await query<{ id: string; url: string; is_saved: boolean }>(
+      `SELECT DISTINCT ON (i.url) i.id, i.url, coalesce(ui.is_saved, false) AS is_saved ${ITEM_FROM}
+        WHERE i.url = ANY($2) ORDER BY i.url, coalesce(ui.is_saved, false) DESC, i.id`,
+      [userId, urls],
+    );
+    const knownUrls = new Set(known.map((k) => k.url));
+    const toSave = known.filter((k) => !k.is_saved);
+    result.alreadySaved += known.length - toSave.length;
+    if (toSave.length) {
+      await query(
+        `INSERT INTO user_items (user_id, item_id, is_saved)
+         SELECT $1, unnest($2::bigint[]), true
+         ON CONFLICT (user_id, item_id) DO UPDATE SET is_saved = true, updated_at = now()`,
+        [userId, toSave.map((k) => k.id)],
+      );
+      result.matchedExisting += toSave.length;
+    }
+
+    const fresh = chunk.filter((b) => !knownUrls.has(b.url));
+    if (fresh.length === 0) continue;
+    const { rowCount } = await query(
+      `WITH ins AS (
+         INSERT INTO items (feed_id, guid, url, headline, published_date, content_status)
+         SELECT $1, t.url, t.url, coalesce(nullif(t.title, ''), t.url), t.saved_at, 'pending'
+           FROM unnest($3::text[], $4::text[], $5::timestamptz[]) AS t(url, title, saved_at)
+         ON CONFLICT (feed_id, guid) DO NOTHING
+         RETURNING id
+       )
+       INSERT INTO user_items (user_id, item_id, is_read, is_saved)
+       SELECT $2, id, true, true FROM ins`,
+      [
+        feedId,
+        userId,
+        fresh.map((b) => b.url),
+        fresh.map((b) => b.title ?? ''),
+        fresh.map((b) => b.savedAt),
+      ],
+    );
+    result.imported += rowCount ?? 0;
+  }
+  return result;
+}
+
+export interface PendingBookmark {
+  id: string;
+  url: string;
+  attempts: number;
+}
+
+/**
+ * Claims the most recently saved bookmark that still needs fetching (one that failed recently
+ * waits `retryAfterMinutes` before another attempt). Concurrent workers never get the same one.
+ */
+export async function claimPendingBookmark(retryAfterMinutes = 60): Promise<PendingBookmark | null> {
+  const { rows } = await query<{ id: string; url: string; attempts: number }>(
+    `UPDATE items SET content_checked_at = now()
+      WHERE id = (
+        SELECT id FROM items
+         WHERE content_status = 'pending' AND url IS NOT NULL
+           AND (content_checked_at IS NULL
+                OR content_checked_at < now() - make_interval(mins => $1))
+         ORDER BY published_date DESC NULLS LAST, id DESC
+         LIMIT 1 FOR UPDATE SKIP LOCKED)
+      RETURNING id, url, content_attempts AS attempts`,
+    [retryAfterMinutes],
+  );
+  return rows[0] ?? null;
+}
+
+export interface BookmarkContent {
+  fullContent: string | null;
+  contentText: string | null;
+  summary: string | null;
+  author: string | null;
+  thumbnailUrl: string | null;
+  /** Why there is no article text, when the page was reachable but had none. */
+  note: string | null;
+}
+
+export async function recordBookmarkContent(itemId: string, c: BookmarkContent): Promise<void> {
+  await query(
+    `UPDATE items SET content_status = 'fetched', content_error = $7, content_checked_at = now(),
+       full_content = $2, content_text = $3, summary = coalesce($4, summary),
+       author = coalesce(author, $5), thumbnail_url = coalesce(thumbnail_url, $6)
+     WHERE id = $1`,
+    [itemId, c.fullContent, c.contentText, c.summary, c.author, c.thumbnailUrl, c.note],
+  );
+}
+
+/** Records a failed fetch; `dead` gives up for good, otherwise the bookmark is retried later. */
+export async function recordBookmarkFailure(itemId: string, error: string, dead: boolean) {
+  await query(
+    `UPDATE items SET content_attempts = content_attempts + 1, content_error = $2,
+       content_status = CASE WHEN $3::boolean THEN 'dead' ELSE content_status END
+     WHERE id = $1`,
+    [itemId, error, dead],
+  );
+}
+
+export interface DeadBookmark {
+  id: string;
+  url: string;
+  headline: string;
+  error: string | null;
+  saved_at: Date | null;
+}
+
+export interface BookmarkReport {
+  total: number;
+  pending: number;
+  fetched: number;
+  dead: DeadBookmark[];
+}
+
+/** Progress of the user's imported bookmarks, and the links that turned out to be dead. */
+export async function bookmarkReport(userId: number): Promise<BookmarkReport> {
+  const { rows } = await query<{ status: string; n: number }>(
+    `SELECT i.content_status AS status, count(*)::int AS n
+       FROM items i JOIN feeds f ON f.id = i.feed_id AND f.kind = 'bookmarks'
+       JOIN subscriptions s ON s.feed_id = f.id AND s.user_id = $1
+      GROUP BY 1`,
+    [userId],
+  );
+  const count = (status: string) => rows.find((r) => r.status === status)?.n ?? 0;
+  const { rows: dead } = await query<DeadBookmark>(
+    `SELECT i.id, i.url, i.headline, i.content_error AS error, i.published_date AS saved_at
+       FROM items i JOIN feeds f ON f.id = i.feed_id AND f.kind = 'bookmarks'
+       JOIN subscriptions s ON s.feed_id = f.id AND s.user_id = $1
+      WHERE i.content_status = 'dead'
+      ORDER BY i.published_date DESC NULLS LAST, i.id DESC`,
+    [userId],
+  );
+  return {
+    total: rows.reduce((n, r) => n + r.n, 0),
+    pending: count('pending'),
+    fetched: count('fetched'),
+    dead,
+  };
+}
+
+/** Bookmarks still waiting to be fetched, across all users. */
+export async function countPendingBookmarks(): Promise<number> {
+  const { rows } = await query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM items WHERE content_status = 'pending'`,
+  );
+  return rows[0].n;
 }
 
 // ---------------------------------------------------------------- items

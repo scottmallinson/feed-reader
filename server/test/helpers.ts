@@ -43,6 +43,14 @@ export async function startFixtureServer() {
       res.writeHead(200, { 'content-type': 'application/rss+xml' }).end(render('arxiv.xml').replace('cs.CL updates on arXiv.org', req.url === '/feed' ? 'Root Feed' : 'Site Posts'));
       return;
     }
+    if (req.url === '/flaky') {
+      res.writeHead(503).end('try later');
+      return;
+    }
+    if (req.url === '/doc.pdf') {
+      res.writeHead(200, { 'content-type': 'application/pdf' }).end('%PDF-1.4');
+      return;
+    }
     const route = routes[req.url ?? ''];
     if (!route) {
       res.writeHead(404).end('not found');

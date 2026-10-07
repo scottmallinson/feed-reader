@@ -5,6 +5,8 @@ import { z } from 'zod';
 import { config } from '../config.js';
 import * as repo from '../db/repo.js';
 import { NoFeedFoundError, resolveFeedUrl } from '../ingest/discover.js';
+import { BookmarksParseError, parseBookmarks } from '../ingest/bookmarks.js';
+import { drainPendingBookmarks } from '../ingest/bookmark-fetch.js';
 import { OpmlParseError, parseOpml } from '../ingest/opml.js';
 import { refreshFeed } from '../ingest/ingest.js';
 import { runIngestion } from '../ingest/scheduler.js';
@@ -31,6 +33,7 @@ const listQuery = z.object({
 });
 
 const opmlBody = z.object({ opml: z.string().min(1) });
+const bookmarksBody = z.object({ html: z.string().min(1) });
 const subscribeBody = z.object({ url: z.url(), board_id: id.nullable().optional() });
 const feedPatch = z
   .object({
@@ -79,8 +82,21 @@ function requireCronAuth(req: Request, res: Response, next: NextFunction) {
   res.status(401).json({ error: 'Unauthorized' });
 }
 
-export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
+export interface AppOptions {
+  userId?: number;
+  webDistDir?: string;
+  /** Called after bookmarks are imported, to start fetching their pages. Defaults to fetching in-process. */
+  startBookmarkFetch?: () => void;
+}
+
+export function createApp(opts: AppOptions = {}) {
   const userId = opts.userId ?? config.userId;
+  const startBookmarkFetch =
+    opts.startBookmarkFetch ??
+    (() => {
+      // Serverless functions stop after the response; there the scheduled passes do the fetching.
+      if (config.bookmarkFetchOnImport) void drainPendingBookmarks();
+    });
   const app = express();
   app.disable('x-powered-by');
   // OPML imports can be a few MB; Vercel caps request bodies at 4.5 MB.
@@ -133,6 +149,23 @@ export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
       res.json({ ...result, invalid });
     },
   );
+  // Import saved links from a Netscape bookmarks file (e.g. Feedly's "Saved For Later" export):
+  // raw HTML body, or JSON { html }. Links join the saved list; article text is fetched afterwards.
+  api.post(
+    '/bookmarks',
+    express.text({ type: ['text/html', 'text/plain'], limit: '4mb' }),
+    async (req, res) => {
+      const html = typeof req.body === 'string' ? req.body : bookmarksBody.parse(req.body).html;
+      const { bookmarks, invalid, duplicates } = parseBookmarks(html);
+      const result = await repo.importBookmarks(userId, bookmarks);
+      if (result.imported > 0) startBookmarkFetch();
+      res.json({ ...result, duplicates, invalid, report: await repo.bookmarkReport(userId) });
+    },
+  );
+  // Fetch progress for imported bookmarks, including the links found to be dead.
+  api.get('/bookmarks/report', async (_req, res) => {
+    res.json(await repo.bookmarkReport(userId));
+  });
   api.patch('/feeds/:id', async (req, res) => {
     let feedId = id.parse(req.params.id);
     const patch = feedPatch.parse(req.body);
@@ -232,7 +265,7 @@ export function createApp(opts: { userId?: number; webDistDir?: string } = {}) {
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof z.ZodError) {
       res.status(400).json({ error: 'Invalid request', issues: err.issues });
-    } else if (err instanceof OpmlParseError) {
+    } else if (err instanceof OpmlParseError || err instanceof BookmarksParseError) {
       res.status(400).json({ error: err.message });
     } else if (err instanceof NoFeedFoundError) {
       res.status(422).json({ error: err.message });

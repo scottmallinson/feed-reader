@@ -7,6 +7,30 @@ export interface OpmlImportResult {
   invalid: string[];
 }
 
+export interface DeadBookmark {
+  id: string;
+  url: string;
+  headline: string;
+  error: string | null;
+  saved_at: string | null;
+}
+
+export interface BookmarkReport {
+  total: number;
+  pending: number;
+  fetched: number;
+  dead: DeadBookmark[];
+}
+
+export interface BookmarkImportResult {
+  imported: number;
+  matchedExisting: number;
+  alreadySaved: number;
+  duplicates: number;
+  invalid: string[];
+  report: BookmarkReport;
+}
+
 const TOKEN_KEY = 'feed-reader-token';
 
 export function getToken(): string | null {
@@ -89,6 +113,9 @@ export const api = {
     request<Feed>(`/feeds/${id}`, { method: 'PATCH', body: JSON.stringify({ board_id }) }),
   importOpml: (opml: string) =>
     request<OpmlImportResult>('/opml', { method: 'POST', body: JSON.stringify({ opml }) }),
+  importBookmarks: (html: string) =>
+    request<BookmarkImportResult>('/bookmarks', { method: 'POST', body: JSON.stringify({ html }) }),
+  bookmarkReport: () => request<BookmarkReport>('/bookmarks/report'),
   unsubscribe: (id: number) => request<void>(`/feeds/${id}`, { method: 'DELETE' }),
   refreshFeed: (id: number) =>
     request<{ inserted: number; error?: string }>(`/feeds/${id}/refresh`, { method: 'POST' }),

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, ApiError, setToken, type ItemQuery } from './api';
-import { describeImport } from './importSummary';
+import { api, ApiError, setToken, type BookmarkReport, type ItemQuery } from './api';
+import { describeBookmarkImport, describeImport } from './importSummary';
 import { ArticleView } from './components/ArticleView';
 import { FeedEditor } from './components/FeedEditor';
 import { ItemList } from './components/ItemList';
@@ -53,6 +53,7 @@ export function App() {
   const [needsToken, setNeedsToken] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [bookmarkReport, setBookmarkReport] = useState<BookmarkReport | null>(null);
 
   const handleError = useCallback((err: unknown) => {
     if (err instanceof ApiError && err.status === 401) setNeedsToken(true);
@@ -104,6 +105,20 @@ export function App() {
   useEffect(() => {
     void loadSidebar();
   }, [loadSidebar]);
+
+  // Imported bookmarks are fetched in the background: show progress, and refresh while it runs.
+  const bookmarksPending = bookmarkReport?.pending ?? 0;
+  useEffect(() => {
+    if (bookmarkReport === null) {
+      api.bookmarkReport().then(setBookmarkReport, () => {});
+      return;
+    }
+    if (bookmarksPending === 0) return;
+    const timer = setInterval(() => {
+      api.bookmarkReport().then(setBookmarkReport, () => {});
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [bookmarkReport === null, bookmarksPending]);
 
   useEffect(() => {
     void loadItems(false);
@@ -235,6 +250,13 @@ export function App() {
           }
           return describeImport(result);
         }}
+        onImportBookmarks={async (file) => {
+          const result = await api.importBookmarks(await file.text());
+          setBookmarkReport(result.report);
+          await Promise.all([loadSidebar(), loadItems(false)]);
+          return describeBookmarkImport(result);
+        }}
+        bookmarkReport={bookmarkReport}
         onCreateBoard={async (name) => {
           try {
             await api.createBoard(name);

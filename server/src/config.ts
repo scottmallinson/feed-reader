@@ -38,6 +38,16 @@ export const config = {
   extractFullArticles: bool('EXTRACT_FULL_ARTICLES', true),
   /** Items whose feed content is shorter than this (in characters of text) get Readability extraction. */
   extractMinChars: int('EXTRACT_MIN_CHARS', 600),
+  /** Imported bookmarks fetched per scheduled pass (most recently saved first). */
+  bookmarkBatch: int('BOOKMARK_BATCH', 40),
+  /** Stop starting new bookmark fetches in a scheduled pass after this long. */
+  bookmarkBudgetMs: int('BOOKMARK_BUDGET_MS', 45000),
+  /** Transient failures (timeouts, 5xx, ...) before a bookmark is reported as dead. */
+  bookmarkMaxAttempts: int('BOOKMARK_MAX_ATTEMPTS', 3),
+  /** Minutes to wait before retrying a bookmark that failed transiently. */
+  bookmarkRetryMinutes: int('BOOKMARK_RETRY_MINUTES', 60),
+  /** After an import, keep fetching bookmarks in this process until none are left (not on Vercel). */
+  bookmarkFetchOnImport: bool('BOOKMARK_FETCH_ON_IMPORT', !process.env.VERCEL),
   userAgent:
     process.env.USER_AGENT ?? 'feed-reader/0.1 (+https://github.com/scottmallinson/feed-reader)',
   mcpPort: int('MCP_PORT', 3001),
