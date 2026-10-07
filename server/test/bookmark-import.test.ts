@@ -5,6 +5,7 @@ import { closePool } from '../src/db/pool.js';
 import * as repo from '../src/db/repo.js';
 import { processPendingBookmarks } from '../src/ingest/bookmark-fetch.js';
 import { refreshFeed } from '../src/ingest/ingest.js';
+import { runIngestion } from '../src/ingest/scheduler.js';
 import { resetDatabase, startFixtureServer } from './helpers.js';
 
 const USER = 1;
@@ -120,5 +121,36 @@ describe('bookmark import', () => {
     const res = await request(app).get('/api/bookmarks/report').expect(200);
     expect(res.body).toMatchObject({ total: 4, pending: 0, fetched: 2 });
     expect(res.body.dead).toHaveLength(2);
+  });
+});
+
+describe('fetching on demand and on schedule', () => {
+  const links = (base: string, ...paths: string[]) =>
+    `<DL>${paths.map((p, i) => `<DT><A HREF="${base}${p}" ADD_DATE="${1_600_000_000 + i}">Link ${p}</A>`).join('')}</DL>`;
+
+  it('POST /bookmarks/fetch works through a batch and returns the report', async () => {
+    await request(app)
+      .post('/api/bookmarks')
+      .send({ html: links(fixtures.base, '/article/pi?n=1', '/article/pi?n=2', '/gone?n=3') })
+      .expect(200);
+    const res = await request(app).post('/api/bookmarks/fetch').expect(200);
+    expect(res.body).toMatchObject({ fetched: 2, dead: 1, retry: 0, remaining: 0 });
+    expect(res.body.report).toMatchObject({ pending: 0, fetched: 4 });
+    expect(res.body.report.dead.map((d: { url: string }) => d.url.replace(fixtures.base, ''))).toContain('/gone?n=3');
+    // Nothing left: a further call is a cheap no-op.
+    const again = await request(app).post('/api/bookmarks/fetch').expect(200);
+    expect(again.body).toMatchObject({ fetched: 0, dead: 0, retry: 0, remaining: 0 });
+  });
+
+  it('the scheduled pass fetches bookmarks too', async () => {
+    await request(app).post('/api/bookmarks').send({ html: links(fixtures.base, '/article/pi?n=4') }).expect(200);
+    const summary = await runIngestion(() => {});
+    expect(summary?.bookmarks).toMatchObject({ fetched: 1, remaining: 0 });
+  });
+
+  it('GET /cron/bookmarks fetches a batch', async () => {
+    await request(app).post('/api/bookmarks').send({ html: links(fixtures.base, '/article/pi?n=5') }).expect(200);
+    const res = await request(app).get('/api/cron/bookmarks').expect(200);
+    expect(res.body.bookmarks).toMatchObject({ fetched: 1, remaining: 0 });
   });
 });
