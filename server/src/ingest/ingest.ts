@@ -154,6 +154,8 @@ export interface RefreshResult {
 }
 
 export async function refreshFeed(feedId: number): Promise<RefreshResult> {
+  // Imported bookmarks have nothing to poll; their pages are fetched by the bookmark worker.
+  if (await repo.isBookmarksFeed(feedId)) return { feedId, inserted: 0 };
   let feedUrl = await repo.getFeedUrl(feedId);
   try {
     let doc = await fetchDocument(feedUrl);

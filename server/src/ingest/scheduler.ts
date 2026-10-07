@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import { config } from '../config.js';
+import { processPendingBookmarks } from './bookmark-fetch.js';
 import { refreshAll } from './ingest.js';
 
 let running = false;
@@ -34,6 +35,10 @@ export async function runIngestion(
       `ingest: ${summary.feeds} feeds, ${summary.inserted} new items, ${summary.errors} errors in ${summary.ms}ms`,
     );
     for (const f of failed) log(`ingest: feed ${f.feedId} failed: ${f.error}`);
+    // A slice of any imported bookmarks still waiting for their article text.
+    await processPendingBookmarks({ log }).catch((err) =>
+      log(`bookmarks: pass failed: ${err instanceof Error ? err.message : String(err)}`),
+    );
     return summary;
   } catch (err) {
     log(`ingest: pass failed: ${err instanceof Error ? err.message : String(err)}`);

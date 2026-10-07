@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { sortByName } from '../src/sort';
-import { describeImport } from '../src/importSummary';
+import { describeBookmarkImport, describeBookmarkProgress, describeImport } from '../src/importSummary';
 
 describe('sortByName', () => {
   it('orders feeds alphabetically by title, ignoring case and accents, with natural numbers', () => {
@@ -43,5 +43,22 @@ describe('describeImport', () => {
       }),
     ).toBe('Added 2 feeds; 1 already followed; 1 duplicate in the file; 1 invalid URL ignored; new board: Tech.');
     expect(describeImport({ added: [], skipped: [], boardsCreated: [], invalid: [] })).toBe('Added 0 feeds.');
+  });
+});
+
+describe('bookmark import summaries', () => {
+  const report = { total: 10, pending: 4, fetched: 5, dead: [{ id: '1', url: 'https://x.test', headline: 'X', error: 'HTTP 404', saved_at: null }] };
+
+  it('summarises an import', () => {
+    expect(
+      describeBookmarkImport({ imported: 8, matchedExisting: 1, alreadySaved: 2, duplicates: 1, invalid: [], report }),
+    ).toBe(
+      'Saved 9 links; 1 matched articles already in your feeds; 2 already saved; 1 duplicate in the file; fetching article text in the background, newest first.',
+    );
+  });
+
+  it('shows progress, then the dead link count', () => {
+    expect(describeBookmarkProgress(report)).toBe('Bookmarks: 6 of 10 fetched, 4 to go.');
+    expect(describeBookmarkProgress({ ...report, pending: 0 })).toBe('Bookmarks: all 10 fetched; 1 dead link.');
   });
 });

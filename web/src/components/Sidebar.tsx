@@ -1,4 +1,6 @@
 import { Fragment, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
+import type { BookmarkReport } from '../api';
+import { describeBookmarkProgress } from '../importSummary';
 import { sortByName } from '../sort';
 import type { Board, Feed, Selection } from '../types';
 
@@ -10,6 +12,10 @@ interface Props {
   onSubscribe: (url: string, boardId: number | null) => Promise<void>;
   /** Imports an OPML file; resolves to a one-line summary for the user. */
   onImportOpml: (file: File) => Promise<string>;
+  /** Imports a Netscape bookmarks file into the saved list; resolves to a one-line summary. */
+  onImportBookmarks: (file: File) => Promise<string>;
+  /** Fetch progress for imported bookmarks, once there are any. */
+  bookmarkReport: BookmarkReport | null;
   onCreateBoard: (name: string) => Promise<void>;
   onDeleteBoard: (board: Board) => void;
   onUnsubscribe: (feed: Feed) => void;
@@ -35,6 +41,7 @@ export function Sidebar(props: Props) {
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState<{ text: string; isError: boolean } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const bookmarkInput = useRef<HTMLInputElement>(null);
   const totalUnread = feeds.reduce((n, f) => n + f.unread_count, 0);
 
   const nav = (s: Selection, label: string, count?: number, extra?: ReactNode, key?: string | number) => (
@@ -61,14 +68,19 @@ export function Sidebar(props: Props) {
     }
   }
 
-  async function importOpml(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = ''; // allow re-importing the same file
-    if (!file) return;
+  function importFile(handler: (file: File) => Promise<string>) {
+    return async (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = ''; // allow re-importing the same file
+      if (file) await runImport(() => handler(file));
+    };
+  }
+
+  async function runImport(run: () => Promise<string>) {
     setImporting(true);
     setImportMessage(null);
     try {
-      setImportMessage({ text: await props.onImportOpml(file), isError: false });
+      setImportMessage({ text: await run(), isError: false });
     } catch (err) {
       setImportMessage({ text: err instanceof Error ? err.message : String(err), isError: true });
     } finally {
@@ -208,12 +220,45 @@ export function Sidebar(props: Props) {
           type="file"
           accept=".opml,.xml,text/xml,application/xml,text/x-opml"
           hidden
-          onChange={importOpml}
+          onChange={importFile(props.onImportOpml)}
           aria-label="OPML file"
         />
         <button type="button" disabled={importing} onClick={() => fileInput.current?.click()}>
           {importing ? 'Importing…' : 'Import OPML…'}
         </button>
+        <input
+          ref={bookmarkInput}
+          type="file"
+          accept=".html,.htm,text/html"
+          hidden
+          onChange={importFile(props.onImportBookmarks)}
+          aria-label="Bookmarks file"
+        />
+        <button type="button" disabled={importing} onClick={() => bookmarkInput.current?.click()}>
+          Import bookmarks…
+        </button>
+        {props.bookmarkReport && props.bookmarkReport.total > 0 && (
+          <>
+            <p className="note" role="status">
+              {describeBookmarkProgress(props.bookmarkReport)}
+            </p>
+            {props.bookmarkReport.dead.length > 0 && (
+              <details className="dead-links">
+                <summary>Dead links ({props.bookmarkReport.dead.length})</summary>
+                <ul>
+                  {props.bookmarkReport.dead.map((d) => (
+                    <li key={d.id}>
+                      <a href={d.url} target="_blank" rel="noopener noreferrer">
+                        {d.headline}
+                      </a>
+                      {d.error && <span className="note"> — {d.error}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </>
+        )}
         {importMessage && (
           <p className={importMessage.isError ? 'error' : 'note'} role="status">
             {importMessage.text}
