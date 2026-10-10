@@ -73,12 +73,6 @@
               "name": "emailTo",
               "value": "scott@scottmallinson.com",
               "type": "string"
-            },
-            {
-              "id": "c6",
-              "name": "emailFrom",
-              "value": "n8n <n8n@scottmallinson.com>",
-              "type": "string"
             }
           ]
         },
@@ -99,7 +93,8 @@
         "text": "={{ $json.prompt }}",
         "options": {
           "systemMessage": "You are a research assistant with read-only access to the user's RSS/Atom feed reader through MCP tools.\n\nHow to work:\n1. If you need to know which feeds or boards exist, call list_feeds.\n2. Call search_feed_items to find candidate articles. Use keyword (web-search syntax, e.g. tiny LLM OR \"small language model\" -crypto), feed_name, board, status and since_days to narrow the results. Keep limit at 25 or less.\n3. Call get_full_article with an item_id for each article you rely on. Read at most 8 articles in full.\n4. Base every claim on the articles you retrieved. Never invent articles, quotes, numbers or URLs. If nothing relevant turns up, say so plainly.\n\nWrite the answer in Markdown for an Obsidian note:\n- The first line is a level-1 heading with a short, specific title (no date).\n- Then a short summary paragraph, then sections with level-2 headings.\n- Link each source inline as [headline](url), and finish with a \"## Sources\" list of every article you used, with its feed name.\n- Do not wrap the answer in a code block and do not add YAML front matter.",
-          "maxIterations": 20
+          "maxIterations": 20,
+          "enableStreaming": false
         }
       }
     },
@@ -155,7 +150,7 @@
         100
       ],
       "parameters": {
-        "jsCode": "// Turns the agent's Markdown into an Obsidian note and an email body.\nconst cfg = $('Config').first().json;\nconst answer = String($json.output ?? '').trim();\nif (!answer) throw new Error('The AI Agent returned no output');\n\nconst heading = answer.match(/^#\\s+(.+)$/m);\nconst title = heading ? heading[1].trim() : 'Feed research';\n// Characters Obsidian refuses (or treats as link syntax) in file names.\nconst safeTitle = title.replace(/[\\\\/:*?\"<>|#^\\[\\]]/g, '').replace(/\\s+/g, ' ').trim().slice(0, 80) || 'Feed research';\nconst stamp = $now.toFormat('yyyy-MM-dd HHmm');\nconst notePath = `${cfg.obsidianFolder}/${stamp} ${safeTitle}.md`;\n\nconst quotedPrompt = String(cfg.prompt).split('\\n').map((line) => '> ' + line).join('\\n');\nconst content = [\n  '---',\n  `created: ${$now.toISO()}`,\n  'source: feed-reader',\n  'tags: [research, feed-reader]',\n  '---',\n  '',\n  answer,\n  '',\n  '> [!info]- Prompt',\n  quotedPrompt,\n  '',\n].join('\\n');\n\nconst obsidianLink = `obsidian://open?vault=${encodeURIComponent(cfg.obsidianVault)}&file=${encodeURIComponent(notePath)}`;\nconst emailMarkdown = `${answer}\\n\\n---\\n\\nSaved to Obsidian: [${cfg.obsidianVault}/${notePath}](${obsidianLink})\\n`;\n\nreturn [{\n  json: {\n    title,\n    notePath,\n    // The Local REST API takes the vault-relative path in the URL, one encoded segment at a time.\n    noteUrl: `${cfg.obsidianApiUrl.replace(/\\/+$/, '')}/vault/${notePath.split('/').map(encodeURIComponent).join('/')}`,\n    content,\n    emailMarkdown,\n    emailTo: cfg.emailTo,\n    emailFrom: cfg.emailFrom,\n  },\n}];"
+        "jsCode": "// Turns the agent's Markdown into an Obsidian note and an email body.\nconst cfg = $('Config').first().json;\nconst answer = String($input.first().json.output ?? '').trim();\nif (!answer) throw new Error('The AI Agent returned no output');\n\nconst heading = answer.match(/^#\\s+(.+)$/m);\nconst title = heading ? heading[1].trim() : 'Feed research';\n// Characters Obsidian refuses (or treats as link syntax) in file names.\nconst safeTitle = title.replace(/[\\\\/:*?\"<>|#^\\[\\]]/g, '').replace(/\\s+/g, ' ').trim().slice(0, 80) || 'Feed research';\nconst stamp = $now.toFormat('yyyy-MM-dd HHmm');\nconst notePath = `${cfg.obsidianFolder}/${stamp} ${safeTitle}.md`;\n\nconst quotedPrompt = String(cfg.prompt).split('\\n').map((line) => '> ' + line).join('\\n');\nconst content = [\n  '---',\n  `created: ${$now.toISO()}`,\n  'source: feed-reader',\n  'tags: [research, feed-reader]',\n  '---',\n  '',\n  answer,\n  '',\n  '> [!info]- Prompt',\n  quotedPrompt,\n  '',\n].join('\\n');\n\nconst obsidianLink = `obsidian://open?vault=${encodeURIComponent(cfg.obsidianVault)}&file=${encodeURIComponent(notePath)}`;\nconst emailMarkdown = `${answer}\\n\\n---\\n\\nSaved to Obsidian: [${cfg.obsidianVault}/${notePath}](${obsidianLink})\\n`;\n\nreturn [{\n  json: {\n    title,\n    notePath,\n    // The Local REST API takes the vault-relative path in the URL, one encoded segment at a time.\n    noteUrl: `${cfg.obsidianApiUrl.replace(/\\/+$/, '')}/vault/${notePath.split('/').map(encodeURIComponent).join('/')}`,\n    content,\n    emailMarkdown,\n    emailTo: cfg.emailTo,\n  },\n}];"
       }
     },
     {
@@ -167,6 +162,7 @@
         1080,
         0
       ],
+      "onError": "continueRegularOutput",
       "parameters": {
         "method": "PUT",
         "url": "={{ $json.noteUrl }}",
@@ -204,19 +200,22 @@
     {
       "id": "b9d6f0a1-0010-4c1e-9a10-000000000010",
       "name": "Email results",
-      "type": "n8n-nodes-base.emailSend",
-      "typeVersion": 2.1,
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
       "position": [
         1320,
         200
       ],
       "parameters": {
-        "fromEmail": "={{ $('Build note').item.json.emailFrom }}",
-        "toEmail": "={{ $('Build note').item.json.emailTo }}",
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Build note').item.json.emailTo }}",
         "subject": "=Feed research: {{ $('Build note').item.json.title }}",
-        "emailFormat": "html",
-        "html": "={{ $json.html }}",
-        "options": {}
+        "emailType": "html",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
       }
     },
     {
@@ -231,7 +230,7 @@
       "parameters": {
         "width": 620,
         "height": 260,
-        "content": "## Setup\n1. **Config**: set `prompt` (TBD) and `obsidianApiUrl`.\n2. **Gemma (Ollama)**: Ollama credential pointing at the Ollama server; `ollama pull gemma4` there (Gemma 3 cannot call tools).\n3. **Feed reader MCP**: Bearer credential with the feed reader `API_TOKEN`.\n4. **Save to Obsidian**: Bearer credential with the Local REST API key from the Personal vault.\n5. **Email results**: SMTP credential.\n\nSee `n8n/README.md` in the feed-reader repo."
+        "content": "## Setup\n1. **Config**: set `prompt` (TBD) and `obsidianApiUrl`.\n2. **Gemma (Ollama)**: Ollama credential pointing at the Ollama server; `ollama pull gemma4` there (Gemma 3 cannot call tools).\n3. **Feed reader MCP**: a dedicated Bearer credential with the feed reader `API_TOKEN` (never another service's token).\n4. **Save to Obsidian**: Bearer credential with the Local REST API key from the Personal vault.\n5. **Email results**: Gmail credential.\n\nSee `n8n/README.md` in the feed-reader repo."
       }
     }
   ],

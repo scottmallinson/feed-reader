@@ -21,12 +21,14 @@ Run manually ──────────┘              │         │     
 4. **Save to Obsidian** writes the note into the Personal vault through the
    [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) plugin.
    **Email results** sends the same answer to scott@scottmallinson.com as HTML, with an
-   `obsidian://` link to the saved note. Both steps run from **Build note**, so if Obsidian is
-   unreachable you still get the email.
+   `obsidian://` link to the saved note. Both steps run from **Build note**, and **Save to
+   Obsidian** is set to continue on error, so if Obsidian is unreachable you still get the email.
 
 ## Setup
 
-Import the file in n8n (**Workflows → Import from File**). It needs a recent n8n whose MCP Client
+The workflow is already in the n8n instance at automation.scottmallinson.com, as **Feed reader
+research → Obsidian + email** (inactive). It uses the existing **Ollama account** and **Gmail
+account** credentials there. To set it up somewhere else, import the file in n8n (**Workflows → Import from File**). It needs a recent n8n whose MCP Client
 Tool node is version 1.2 or later, for the HTTP Streamable transport. Then fill in the following.
 
 ### The prompt (TBD)
@@ -52,7 +54,8 @@ tools and the output format, so the prompt only has to say what to research.
 ### Feed reader MCP
 
 Create a **Bearer Auth** credential with the deployment's `API_TOKEN` and select it on
-**Feed reader MCP**. The endpoint is `https://reader.scottmallinson.com/mcp`, the stateless
+**Feed reader MCP**. Use a credential made for the feed reader only. n8n preselects whichever
+Bearer credential already exists, and any other service's token would be sent to the feed reader. The endpoint is `https://reader.scottmallinson.com/mcp`, the stateless
 Streamable HTTP server described in the [main README](../README.md#mcp-server).
 
 ### Obsidian (Personal vault, Research folder)
@@ -63,6 +66,9 @@ Streamable HTTP server described in the [main README](../README.md#mcp-server).
    `https://<host>:27124`. n8n has to reach that machine, for example over your LAN or
    Tailscale, and Obsidian must be running when the workflow runs.
 3. Create a **Bearer Auth** credential with the API key and select it on **Save to Obsidian**.
+   (The live copy uses n8n's templated custom auth instead, because n8n's builder won't create
+   new plain bearer credentials on HTTP Request nodes. Give it the header
+   `Authorization: Bearer <API key>`.)
    That node accepts the plugin's self-signed certificate. If you enable the plugin's HTTP port
    (27123), use `http://` instead.
 
@@ -76,10 +82,9 @@ to `<vault path>/{{ $json.notePath }}`.
 
 ### Email
 
-Create an **SMTP** credential and select it on **Email results**. Set `emailFrom` in **Config**
-to an address your SMTP server is allowed to send as. `emailTo` is scott@scottmallinson.com. To
-send through Gmail or Outlook instead, replace the node and keep its subject and HTML
-expressions.
+**Email results** is a Gmail node: select a Gmail credential on it. `emailTo` in **Config** is
+scott@scottmallinson.com. To send through SMTP or Outlook instead, replace the node and keep its
+subject and HTML expressions.
 
 ### Schedule
 
