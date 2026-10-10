@@ -42,6 +42,12 @@ docker compose up -d --build
 open http://localhost:3000
 ```
 
+The database image is `pgvector/pgvector:pg16`, Postgres 16 with the pgvector extension used for
+[searching by similarity](#enrichment-tags-embeddings-and-topics). If you started with an earlier
+version of this file (`postgres:16-alpine`), your data volume works with the new image, but the
+C library changes, so run `docker compose exec db psql -U feeds -c 'REINDEX DATABASE feeds'` once
+after switching. Or keep the old image: everything except similarity search still works.
+
 Follow a feed from the sidebar (for example `https://rss.arxiv.org/rss/cs.CL` or
 `https://www.reddit.com/r/LocalAI/.rss`). It is fetched right away and then every 15 minutes.
 You can also paste a website's address (such as `https://simonwillison.net`): the reader uses the
@@ -118,8 +124,8 @@ npm run dev:api                     # API on :3000 (runs migrations + scheduler)
 npm run dev:web                     # UI on :5173, proxies /api to :3000
 ```
 
-Other scripts: `npm test` (needs a Postgres database; set `TEST_DATABASE_URL`, default
-`postgres://feeds:feeds@localhost:5432/feeds_test`), `npm run typecheck`, `npm run build`,
+Other scripts: `npm test` (needs a Postgres database with pgvector available; set
+`TEST_DATABASE_URL`, default `postgres://feeds:feeds@localhost:5432/feeds_test`), `npm run typecheck`, `npm run build`,
 `npm run migrate`, and `npm run worker -w server` to run ingestion as a separate process
 (set `INGEST_IN_PROCESS=false` on the API when you do). All settings are listed in
 [`.env.example`](.env.example).
@@ -133,6 +139,9 @@ Other scripts: `npm test` (needs a Postgres database; set `TEST_DATABASE_URL`, d
 | `boards`        | User collections such as "Machine Learning" or "News"                        |
 | `subscriptions` | Which feeds a user follows, optionally filed under a board                  |
 | `user_items`    | Per-user `is_read`, `is_saved` and an optional `board_id` pin                |
+| `item_enrichment` | `tags` and a short `summary` per item, written by an [enricher](#enrichment-tags-embeddings-and-topics) |
+| `topics`        | A user's standing interests: `slug`, `name`, free-text `description`, `keywords` |
+| `item_embeddings`, `topic_embeddings` | One vector per item (or topic) per embedding model; only created when pgvector is available |
 
 An item belongs to a board when its feed is filed there or when it was pinned to the board
 individually. Migrations live in `server/migrations/` and run automatically on startup.
@@ -168,10 +177,12 @@ any number of instances.
 
 | Tool                | Arguments                                                                                           | Returns |
 | ------------------- | --------------------------------------------------------------------------------------------------- | ------- |
-| `search_feed_items` | `keyword?` (websearch syntax), `feed_name?` (string or list, matched against feed title/URL), `board?`, `status` (`read`/`unread`/`all`), `saved_only`, `since_days?`, `limit` | JSON list of `item_id`, `headline`, `summary`, `feed`, `url`, `published_date`, `is_read`, `is_saved` |
+| `search_feed_items` | `keyword?` (websearch syntax), `feed_name?` (string or list, matched against feed title/URL), `board?`, `tags?` (string or list; any of them), `topic?` (slug; ranks by similarity), `min_similarity?`, `status` (`read`/`unread`/`all`), `saved_only`, `since_days?`, `limit` | JSON list of `item_id`, `headline`, `summary`, `feed`, `url`, `published_date`, `is_read`, `is_saved`, plus `tags`, `ai_summary` and `similarity` when present |
 | `get_full_article`  | `item_id`                                                                                           | Full article text with metadata |
 | `mark_as_read`      | `item_id` (string or list), `is_read` (default `true`)                                              | Updated ids, plus `not_found` for any unknown ids |
 | `list_feeds`        | (none)                                                                                              | Boards and feeds with slugs, unread counts and resource URIs |
+| `list_tags`         | `since_days?`                                                                                       | Tags in use with article counts, most common first |
+| `list_topics`       | (none)                                                                                              | The user's topics: slug, name, description, keywords, and whether they are embedded |
 
 ### Resources
 
@@ -228,6 +239,43 @@ send `Authorization: Bearer <token>`. To run MCP on its own port instead, use
 2. It picks the most relevant hits and calls `get_full_article({ item_id })` for each.
 3. It writes the summary, and if you asked it to tidy up, calls `mark_as_read` with the ids it processed.
 
+## Enrichment: tags, embeddings and topics
+
+The reader can store what a language model makes of each article and use it to search, without
+calling a model itself. An external **enricher** does the model work: typically a scheduled n8n
+workflow, or a script, talking to a local model through Ollama or to any API you prefer. That
+keeps the reader light enough to run on a serverless free tier while the model runs wherever you
+have one.
+
+- **Tags** are short labels from a vocabulary the enricher chooses (`ai-agents`, `web-dev`, ...).
+  Filter by them with `tags` on `search_feed_items`, `GET /api/items` or `POST /api/items/search`.
+  The reader lower-cases them and replaces spaces with hyphens.
+- **Summaries** are a sentence or two per article, returned as `ai_summary`.
+- **Embeddings** are vectors from an embedding model (for example `embeddinggemma`). Searches rank
+  by cosine similarity to a topic's embedding, or to an embedding you pass in. Vectors are only
+  compared within one model name and size, so you can switch models and re-embed gradually.
+  Embeddings need pgvector, which Neon, Supabase and the bundled Docker image provide. Without it
+  the migration skips the embedding tables, embedding requests return `501`, and everything else
+  works.
+- **Topics** are a user's standing interests or projects: a name, a free-text description and
+  optional keywords. The enricher embeds the description; `topic` on a search then ranks articles
+  by similarity to it. Items matching a keyword are included too, so a topic is useful before it
+  is embedded, or without pgvector. Changing a topic discards its embeddings, so the enricher
+  embeds it again. Keep a topic's description current (from a project's README, roadmap or notes)
+  and searches follow along.
+
+An enricher loop:
+
+1. `GET /api/enrichment/pending?model=embeddinggemma&limit=50` returns items that are untagged
+   (`needs_tags`) or have no embedding from that model (`needs_embedding`), newest first, with
+   their headline, summary and up to `text_chars` of article text. It also returns topics that
+   need embedding, with the text to embed.
+2. Tag, summarise and embed them.
+3. `POST /api/enrichment` with the results, and `PUT /api/topics/:slug/embedding` for each topic.
+
+To re-tag everything after changing your vocabulary, add `retag_before=<ISO time>`: items tagged
+before then count as untagged. Imported bookmarks are offered once their page has been fetched.
+
 ## REST API
 
 All routes are under `/api` and accept or return JSON. When `API_TOKEN` is set they require
@@ -254,6 +302,14 @@ All routes are under `/api` and accept or return JSON. When `API_TOKEN` is set t
 | `GET`    | `/items/:id`            | Includes `full_content` |
 | `PATCH`  | `/items/:id`            | `{ is_read?, is_saved?, board_id? }` |
 | `POST`   | `/items/mark-read`      | `{ item_ids, is_read? }` or `{ feed_id? , board_id? }` (everything when neither is given) |
+| `POST`   | `/items/search`         | JSON body: `keyword`, `tags`, `topic` or `embedding: { model, vector }`, `min_similarity`, `board`, `feed_id`, `feed_name`, `status`, `saved_only`, `since_days`, `limit` (up to 200). `GET /items` also takes `tags` (comma-separated) and `topic` |
+| `GET`    | `/tags`                 | Tags in use with counts; `since_days` optional |
+| `GET`    | `/topics`               | The user's topics, with the models that have embedded each |
+| `GET` `PUT` `DELETE` | `/topics/:slug` | `PUT { name?, description?, keywords? }` creates or updates; changing it discards its embeddings |
+| `PUT`    | `/topics/:slug/embedding` | `{ model, vector }` |
+| `GET`    | `/enrichment/pending`   | `limit`, `model`, `text_chars`, `retag_before`: items and topics an enricher should process |
+| `POST`   | `/enrichment`           | `{ items: [{ item_id, tags?, summary?, model?, embedding?: { model, vector } }] }`, up to 200 |
+| `GET`    | `/enrichment/status`    | Whether pgvector is available, and how many items are tagged and embedded (per model) |
 
 ## Security notes
 
