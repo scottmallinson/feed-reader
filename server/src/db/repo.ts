@@ -1,6 +1,7 @@
 import type { Bookmark } from '../ingest/bookmarks.js';
 import { feedKey, type OpmlFeed } from '../ingest/opml.js';
 import { escapeLike, slugify } from '../lib/slug.js';
+import { type Embedding, InvalidInputError, requireVectors, vectorLiteral } from './enrichment.js';
 import { getPool, query } from './pool.js';
 
 export type ReadStatus = 'read' | 'unread' | 'all';
@@ -41,6 +42,11 @@ export interface ItemRow {
   is_read: boolean;
   is_saved: boolean;
   board_id: number | null;
+  /** Set by an enricher (see enrichment.ts); empty until then. */
+  tags: string[];
+  ai_summary: string | null;
+  /** Cosine similarity to the search's topic or embedding, when there was one. */
+  similarity?: number | null;
   full_content?: string | null;
   content_text?: string | null;
 }
@@ -64,14 +70,17 @@ const ITEM_COLUMNS = `
   i.thumbnail_url, i.published_date,
   coalesce(ui.is_read, false) AS is_read,
   coalesce(ui.is_saved, false) AS is_saved,
-  ui.board_id`;
+  ui.board_id,
+  coalesce(ie.tags, '{}') AS tags,
+  ie.summary AS ai_summary`;
 
 // Items the user can see: anything from a subscribed feed. `$1` is always the user id.
 const ITEM_FROM = `
   FROM items i
   JOIN feeds f ON f.id = i.feed_id
   JOIN subscriptions s ON s.feed_id = i.feed_id AND s.user_id = $1
-  LEFT JOIN user_items ui ON ui.item_id = i.id AND ui.user_id = $1`;
+  LEFT JOIN user_items ui ON ui.item_id = i.id AND ui.user_id = $1
+  LEFT JOIN item_enrichment ie ON ie.item_id = i.id`;
 
 const SORT_DATE = 'coalesce(i.published_date, i.created_at)';
 
@@ -780,13 +789,24 @@ export interface SearchOptions {
   status?: ReadStatus;
   savedOnly?: boolean;
   sinceDays?: number;
+  /** Items carrying any of these tags. */
+  tags?: string[];
+  /** Rank by similarity to a topic's embedding; items matching its keywords also qualify. */
+  topicSlug?: string;
+  /** Rank by similarity to this embedding (e.g. of a query, computed by the caller). */
+  embedding?: Embedding;
+  /** Drop items less similar than this (cosine similarity, -1 to 1). */
+  minSimilarity?: number;
   limit?: number;
+  /** Upper bound for `limit` (MCP keeps answers short; workflows can ask for more). */
+  maxLimit?: number;
 }
 
 /**
- * Full-text search over the user's items. `keyword` uses Postgres websearch syntax, so
- * `tiny LLM OR "small language model" -crypto` works. Without a keyword the most recent
- * matching items are returned.
+ * Searches the user's items. `keyword` uses Postgres websearch syntax, so
+ * `tiny LLM OR "small language model" -crypto` works. With a topic or an embedding, results
+ * are ranked by similarity instead (this needs pgvector and items embedded by an enricher with
+ * the same model). Without either, the most recent matching items are returned.
  */
 export async function searchItems(userId: number, opts: SearchOptions): Promise<ItemRow[]> {
   const values: unknown[] = [userId];
@@ -795,13 +815,36 @@ export async function searchItems(userId: number, opts: SearchOptions): Promise<
     return `$${values.length}`;
   };
   const where: string[] = [];
-  // Relevance ordering only applies to keyword searches (a bare `ORDER BY 0` is a column position).
-  let rank = '';
+  const joins: string[] = [];
+  const order: string[] = [];
+  let similarity = 'NULL::float8';
+
+  if (opts.topicSlug !== undefined || opts.embedding !== undefined) {
+    if (opts.topicSlug !== undefined && opts.embedding !== undefined) {
+      throw new InvalidInputError('Search by a topic or an embedding, not both');
+    }
+    if (opts.embedding) {
+      await requireVectors();
+      const v = `${param(vectorLiteral(opts.embedding))}::vector`;
+      joins.push(
+        `JOIN item_embeddings ee ON ee.item_id = i.id AND ee.model = ${param(opts.embedding.model.trim())}
+           AND vector_dims(ee.embedding) = vector_dims(${v})`,
+      );
+      similarity = `1 - (ee.embedding <=> ${v})`;
+    } else {
+      similarity = await topicSimilarity(userId, opts.topicSlug!, param, joins, where);
+    }
+    if (opts.minSimilarity !== undefined) {
+      where.push(`(${similarity} >= ${param(opts.minSimilarity)} OR ${similarity} IS NULL)`);
+    }
+    order.push(`${similarity} DESC NULLS LAST`);
+  }
+
   const keyword = opts.keyword?.trim();
   if (keyword) {
     const q = `websearch_to_tsquery('english', ${param(keyword)})`;
     where.push(`i.search @@ ${q}`);
-    rank = `ts_rank(i.search, ${q})`;
+    order.push(`ts_rank(i.search, ${q}) DESC`);
   }
   if (opts.feedId !== undefined) where.push(`i.feed_id = ${param(opts.feedId)}`);
   const names = (opts.feedNames ?? []).map((n) => n.trim()).filter(Boolean);
@@ -817,21 +860,77 @@ export async function searchItems(userId: number, opts: SearchOptions): Promise<
       boardCondition(`(SELECT id FROM boards WHERE user_id = $1 AND slug = ${param(opts.boardSlug)})`),
     );
   }
+  const tags = (opts.tags ?? []).map((t) => t.trim().toLowerCase()).filter(Boolean);
+  if (tags.length) where.push(`ie.tags && ${param(tags)}::text[]`);
   const status = statusCondition(opts.status ?? 'all');
   if (status) where.push(status);
   if (opts.savedOnly) where.push('coalesce(ui.is_saved, false)');
   if (opts.sinceDays !== undefined) {
     where.push(`${SORT_DATE} >= now() - make_interval(days => ${param(opts.sinceDays)})`);
   }
-  const limit = Math.min(Math.max(opts.limit ?? 10, 1), 50);
+  const limit = Math.min(Math.max(opts.limit ?? 10, 1), opts.maxLimit ?? 50);
   const { rows } = await query<ItemRow>(
-    `SELECT ${ITEM_COLUMNS} ${ITEM_FROM}
+    `SELECT ${ITEM_COLUMNS}, ${similarity} AS similarity ${ITEM_FROM}
+     ${joins.join('\n')}
      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-     ORDER BY ${rank ? `${rank} DESC, ` : ''}${SORT_DATE} DESC, i.id DESC
+     ORDER BY ${[...order, `${SORT_DATE} DESC`, 'i.id DESC'].join(', ')}
      LIMIT ${param(limit)}`,
     values,
   );
   return rows;
+}
+
+/**
+ * Adds what a topic search needs to the query and returns the similarity expression. Items are
+ * ranked by similarity to the topic's newest embedding; items matching one of its keywords count
+ * too, so a topic is useful before (or without) embeddings.
+ */
+async function topicSimilarity(
+  userId: number,
+  slug: string,
+  param: (v: unknown) => string,
+  joins: string[],
+  where: string[],
+): Promise<string> {
+  const { rows } = await query<{ id: number; keywords: string[] }>(
+    'SELECT id, keywords FROM topics WHERE user_id = $1 AND slug = $2',
+    [userId, slug],
+  );
+  const topic = rows[0];
+  if (!topic) throw new NotFoundError(`Topic ${slug} not found`);
+
+  const { rows: emb } = await query<{ ok: boolean }>(`SELECT to_regclass('topic_embeddings') IS NOT NULL AS ok`);
+  let model: string | undefined;
+  if (emb[0].ok) {
+    const { rows: m } = await query<{ model: string }>(
+      'SELECT model FROM topic_embeddings WHERE topic_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [topic.id],
+    );
+    model = m[0]?.model;
+  }
+  const keywordQuery = topic.keywords.map((k) => (/\s/.test(k) ? `"${k.replace(/"/g, '')}"` : k)).join(' OR ');
+  if (!model && !keywordQuery) {
+    throw new NotFoundError(`Topic ${slug} has no embedding or keywords to search with yet`);
+  }
+
+  const matches: string[] = [];
+  let similarity = 'NULL::float8';
+  if (model) {
+    const t = param(topic.id);
+    const m = param(model);
+    joins.push(
+      `LEFT JOIN topic_embeddings te ON te.topic_id = ${t} AND te.model = ${m}
+       LEFT JOIN item_embeddings ee ON ee.item_id = i.id AND ee.model = ${m}
+         AND vector_dims(ee.embedding) = vector_dims(te.embedding)`,
+    );
+    similarity = '1 - (ee.embedding <=> te.embedding)';
+    matches.push('ee.item_id IS NOT NULL');
+  }
+  if (keywordQuery) {
+    matches.push(`i.search @@ websearch_to_tsquery('english', ${param(keywordQuery)})`);
+  }
+  where.push(`(${matches.join(' OR ')})`);
+  return similarity;
 }
 
 export async function ensureUser(userId: number): Promise<void> {

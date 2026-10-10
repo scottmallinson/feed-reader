@@ -1,6 +1,7 @@
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { config } from '../config.js';
+import * as enrichment from '../db/enrichment.js';
 import * as repo from '../db/repo.js';
 import type { ItemRow } from '../db/repo.js';
 
@@ -24,6 +25,9 @@ function brief(item: ItemRow) {
     published_date: item.published_date?.toISOString() ?? null,
     is_read: item.is_read,
     is_saved: item.is_saved,
+    ...(item.tags.length ? { tags: item.tags } : {}),
+    ...(item.ai_summary ? { ai_summary: item.ai_summary } : {}),
+    ...(item.similarity != null ? { similarity: Number(Number(item.similarity).toFixed(4)) } : {}),
   };
 }
 
@@ -63,7 +67,9 @@ export function createMcpServer(userId = config.userId): McpServer {
       instructions:
         'Access to the user\'s self-hosted RSS/Atom feed reader. Use search_feed_items to find ' +
         'articles (full-text search, filterable by feed, board, read status and age), then ' +
-        'get_full_article for the complete text of the relevant ones. Call mark_as_read on items ' +
+        'get_full_article for the complete text of the relevant ones. If list_tags or ' +
+        'list_topics return anything, items have been tagged and the user has standing topics: ' +
+        'filter by tags, or pass a topic to rank items by relevance to it. Call mark_as_read on items ' +
         'you have processed when the user asks you to clean up their inbox. Boards and ' +
         'subscriptions are also exposed as resources (feed://boards/{slug}, ' +
         'feed://subscriptions/{slug}) containing their newest unread articles.',
@@ -77,10 +83,11 @@ export function createMcpServer(userId = config.userId): McpServer {
     {
       title: 'Search feed items',
       description:
-        'Full-text search across articles from the user\'s subscribed feeds. Returns matching ' +
-        'item_id, headline, summary, feed, url and dates, best matches first. The keyword ' +
-        'supports web-search syntax: `tiny LLM OR "small language model" -crypto`. Omit keyword ' +
-        'to list the newest items matching the other filters.',
+        'Search articles from the user\'s subscribed feeds. Returns matching item_id, headline, ' +
+        'summary, feed, url, dates and any tags, best matches first. The keyword supports ' +
+        'web-search syntax: `tiny LLM OR "small language model" -crypto`. With topic, results ' +
+        'are ranked by relevance to that topic (see list_topics) and include a similarity score. ' +
+        'Omit keyword and topic to list the newest items matching the other filters.',
       inputSchema: {
         keyword: z
           .string()
@@ -92,6 +99,19 @@ export function createMcpServer(userId = config.userId): McpServer {
             'Restrict to feeds whose title or URL contains this text (case-insensitive), e.g. "Arxiv" or ["Arxiv", "r/LocalAI"].',
           ),
         board: z.string().optional().describe('Restrict to a board, by slug (see list_feeds).'),
+        tags: stringOrList
+          .optional()
+          .describe('Only items carrying any of these tags (see list_tags), e.g. ["ai-models", "ai-agents"].'),
+        topic: z
+          .string()
+          .optional()
+          .describe('Rank by relevance to one of the user\'s topics, by slug (see list_topics).'),
+        min_similarity: z
+          .number()
+          .min(-1)
+          .max(1)
+          .optional()
+          .describe('With topic: drop items less similar than this (cosine similarity).'),
         status: z.enum(['read', 'unread', 'all']).default('all').describe('Read-state filter.'),
         saved_only: z.boolean().default(false).describe('Only items the user saved.'),
         since_days: z
@@ -106,16 +126,26 @@ export function createMcpServer(userId = config.userId): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async (args) => {
-      const results = await repo.searchItems(userId, {
-        keyword: args.keyword,
-        feedNames: toList(args.feed_name),
-        boardSlug: args.board,
-        status: args.status,
-        savedOnly: args.saved_only,
-        sinceDays: args.since_days,
-        limit: args.limit,
-      });
-      return json({ count: results.length, items: results.map(brief) });
+      try {
+        const results = await repo.searchItems(userId, {
+          keyword: args.keyword,
+          feedNames: toList(args.feed_name),
+          boardSlug: args.board,
+          status: args.status,
+          savedOnly: args.saved_only,
+          sinceDays: args.since_days,
+          tags: toList(args.tags),
+          topicSlug: args.topic,
+          minSimilarity: args.min_similarity,
+          limit: args.limit,
+        });
+        return json({ count: results.length, items: results.map(brief) });
+      } catch (err) {
+        if (err instanceof repo.NotFoundError || err instanceof enrichment.FeatureUnavailableError) {
+          return toolError(err.message);
+        }
+        throw err;
+      }
     },
   );
 
@@ -192,6 +222,42 @@ export function createMcpServer(userId = config.userId): McpServer {
           last_fetched: f.last_fetched,
           last_error: f.last_error,
           resource: f.slug ? `feed://subscriptions/${f.slug}` : null,
+        })),
+      });
+    },
+  );
+
+  server.registerTool(
+    'list_tags',
+    {
+      title: 'List tags',
+      description:
+        'List the tags an enricher has put on the user\'s articles, with how many articles carry each, most common first. Empty when nothing has been tagged.',
+      inputSchema: {
+        since_days: z.number().int().min(1).max(3650).optional().describe('Only count articles from the last N days.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ since_days }) => json({ tags: await enrichment.listTags(userId, since_days) }),
+  );
+
+  server.registerTool(
+    'list_topics',
+    {
+      title: 'List topics',
+      description:
+        'List the user\'s standing topics (interests or projects), each with a slug, name, description and keywords. Pass a slug as search_feed_items\' topic to rank articles by relevance to it.',
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async () => {
+      const topics = await enrichment.listTopics(userId);
+      return json({
+        topics: topics.map((t) => ({
+          slug: t.slug,
+          name: t.name,
+          description: t.description,
+          keywords: t.keywords,
+          ranked_by_similarity: t.embedding_models.length > 0,
         })),
       });
     },
