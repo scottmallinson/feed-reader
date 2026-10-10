@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { config } from '../config.js';
+import * as enrichment from '../db/enrichment.js';
 import * as repo from '../db/repo.js';
 import { NoFeedFoundError, resolveFeedUrl } from '../ingest/discover.js';
 import { BookmarksParseError, parseBookmarks } from '../ingest/bookmarks.js';
@@ -28,6 +29,9 @@ const listQuery = z.object({
     .transform((v) => v === 'true')
     .optional(),
   q: z.string().optional(),
+  // Comma-separated; items carrying any of them.
+  tags: z.string().optional(),
+  topic: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
   offset: z.coerce.number().int().min(0).default(0),
 });
@@ -51,6 +55,50 @@ const itemPatch = z.object({
   is_saved: z.boolean().optional(),
   board_id: id.nullable().optional(),
 });
+const tagList = z.union([z.string(), z.array(z.string())]).transform((v) => (Array.isArray(v) ? v : [v]));
+const embedding = z.object({ model: z.string().trim().min(1), vector: z.array(z.number()).min(1) });
+const searchBody = z
+  .object({
+    keyword: z.string().optional(),
+    tags: tagList.optional(),
+    topic: z.string().optional(),
+    embedding: embedding.optional(),
+    min_similarity: z.number().min(-1).max(1).optional(),
+    board: z.string().optional(),
+    feed_id: id.optional(),
+    feed_name: tagList.optional(),
+    status: status.default('all'),
+    saved_only: z.boolean().default(false),
+    since_days: z.number().int().min(1).max(3650).optional(),
+    limit: z.number().int().min(1).max(200).default(50),
+  })
+  .refine((b) => !(b.topic && b.embedding), { message: 'Search by a topic or an embedding, not both' });
+const pendingQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(500).default(50),
+  model: z.string().trim().min(1).optional(),
+  text_chars: z.coerce.number().int().min(0).max(100_000).default(4000),
+  retag_before: z.coerce.date().optional(),
+});
+const enrichmentBody = z.object({
+  items: z
+    .array(
+      z.object({
+        item_id: z.coerce.string(),
+        tags: z.array(z.string()).optional(),
+        summary: z.string().nullable().optional(),
+        model: z.string().nullable().optional(),
+        embedding: embedding.optional(),
+      }),
+    )
+    .min(1)
+    .max(200),
+});
+const topicBody = z.object({
+  name: z.string().trim().min(1).max(200).optional(),
+  description: z.string().max(20_000).optional(),
+  keywords: z.array(z.string().max(200)).max(50).optional(),
+});
+const sinceQuery = z.object({ since_days: z.coerce.number().int().min(1).max(3650).optional() });
 const markReadBody = z.union([
   z.object({ item_ids: z.array(z.string()).min(1), is_read: z.boolean().default(true) }),
   z.object({ feed_id: id.optional(), board_id: id.optional(), all: z.literal(true).optional() }),
@@ -221,18 +269,22 @@ export function createApp(opts: AppOptions = {}) {
   // ------------------------------------------------------------ items
   api.get('/items', async (req, res) => {
     const q = listQuery.parse(req.query);
-    if (q.q?.trim()) {
+    const tags = q.tags?.split(',').map((t) => t.trim()).filter(Boolean) ?? [];
+    if (q.q?.trim() || tags.length || q.topic) {
       const board = q.board_id
         ? (await repo.listBoards(userId)).find((b) => b.id === q.board_id)
         : undefined;
       res.json(
         await repo.searchItems(userId, {
           keyword: q.q,
+          tags,
+          topicSlug: q.topic,
           status: q.status,
           savedOnly: q.saved,
           boardSlug: board?.slug,
           feedId: q.feed_id,
-          limit: Math.min(q.limit, 50),
+          limit: q.limit,
+          maxLimit: 200,
         }),
       );
       return;
@@ -246,6 +298,27 @@ export function createApp(opts: AppOptions = {}) {
         includeContent: q.content,
         limit: q.limit,
         offset: q.offset,
+      }),
+    );
+  });
+  // Search with everything GET /items offers plus an embedding to rank by, for workflows.
+  api.post('/items/search', async (req, res) => {
+    const b = searchBody.parse(req.body);
+    res.json(
+      await repo.searchItems(userId, {
+        keyword: b.keyword,
+        tags: b.tags,
+        topicSlug: b.topic,
+        embedding: b.embedding,
+        minSimilarity: b.min_similarity,
+        boardSlug: b.board,
+        feedId: b.feed_id,
+        feedNames: b.feed_name,
+        status: b.status,
+        savedOnly: b.saved_only,
+        sinceDays: b.since_days,
+        limit: b.limit,
+        maxLimit: 200,
       }),
     );
   });
@@ -264,6 +337,48 @@ export function createApp(opts: AppOptions = {}) {
     }
     const updated = await repo.markAllRead(userId, { feedId: body.feed_id, boardId: body.board_id });
     res.json({ updated });
+  });
+
+  // ------------------------------------------------------------ enrichment
+  // An external enricher (e.g. an n8n workflow calling a local model) asks for work, then posts
+  // tags, summaries and embeddings back. See "Enrichment" in the README.
+  api.get('/enrichment/status', async (_req, res) => {
+    res.json(await enrichment.enrichmentStatus(userId));
+  });
+  api.get('/enrichment/pending', async (req, res) => {
+    const q = pendingQuery.parse(req.query);
+    res.json(
+      await enrichment.pendingEnrichment(userId, {
+        limit: q.limit,
+        model: q.model,
+        textChars: q.text_chars,
+        retagBefore: q.retag_before,
+      }),
+    );
+  });
+  api.post('/enrichment', async (req, res) => {
+    res.json(await enrichment.saveEnrichment(userId, enrichmentBody.parse(req.body).items));
+  });
+  api.get('/tags', async (req, res) => {
+    res.json(await enrichment.listTags(userId, sinceQuery.parse(req.query).since_days));
+  });
+
+  // ------------------------------------------------------------ topics
+  api.get('/topics', async (_req, res) => {
+    res.json(await enrichment.listTopics(userId));
+  });
+  api.get('/topics/:slug', async (req, res) => {
+    res.json(await enrichment.getTopic(userId, req.params.slug));
+  });
+  api.put('/topics/:slug', async (req, res) => {
+    res.json(await enrichment.upsertTopic(userId, req.params.slug, topicBody.parse(req.body)));
+  });
+  api.delete('/topics/:slug', async (req, res) => {
+    await enrichment.deleteTopic(userId, req.params.slug);
+    res.status(204).end();
+  });
+  api.put('/topics/:slug/embedding', async (req, res) => {
+    res.json(await enrichment.saveTopicEmbedding(userId, req.params.slug, embedding.parse(req.body)));
   });
 
   app.use('/api', api);
@@ -288,6 +403,10 @@ export function createApp(opts: AppOptions = {}) {
       res.status(400).json({ error: err.message });
     } else if (err instanceof NoFeedFoundError) {
       res.status(422).json({ error: err.message });
+    } else if (err instanceof enrichment.InvalidInputError) {
+      res.status(400).json({ error: err.message });
+    } else if (err instanceof enrichment.FeatureUnavailableError) {
+      res.status(501).json({ error: err.message });
     } else if (err instanceof repo.ConflictError) {
       res.status(409).json({ error: err.message });
     } else if (err instanceof repo.NotFoundError) {

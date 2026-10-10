@@ -392,6 +392,8 @@ describe('MCP server', () => {
     expect(tools.map((t) => t.name).sort()).toEqual([
       'get_full_article',
       'list_feeds',
+      'list_tags',
+      'list_topics',
       'mark_as_read',
       'search_feed_items',
     ]);
