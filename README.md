@@ -228,6 +228,12 @@ send `Authorization: Bearer <token>`. To run MCP on its own port instead, use
 2. It picks the most relevant hits and calls `get_full_article({ item_id })` for each.
 3. It writes the summary, and if you asked it to tidy up, calls `mark_as_read` with the ids it processed.
 
+### Scheduled research with n8n
+
+[`n8n/feed-research.workflow.json`](n8n/feed-research.workflow.json) runs a research prompt
+against the MCP server with Gemma (via Ollama), saves the answer as a note in an Obsidian vault
+and emails it. Setup is in [`n8n/README.md`](n8n/README.md).
+
 ## REST API
 
 All routes are under `/api` and accept or return JSON. When `API_TOKEN` is set they require

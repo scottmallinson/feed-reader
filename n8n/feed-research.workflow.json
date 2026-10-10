@@ -1,0 +1,337 @@
+{
+  "name": "Feed reader research → Obsidian + email",
+  "nodes": [
+    {
+      "id": "b9d6f0a1-0001-4c1e-9a10-000000000001",
+      "name": "Every morning",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 7
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b9d6f0a1-0002-4c1e-9a10-000000000002",
+      "name": "Run manually",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "b9d6f0a1-0003-4c1e-9a10-000000000003",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        100
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c1",
+              "name": "prompt",
+              "value": "TBD: replace this with your research prompt.\n\nPlaceholder so the workflow runs end to end: find the most interesting unread articles from my feeds in the past 7 days, read the five most relevant in full, and write a research briefing on the main themes, with links to the sources.",
+              "type": "string"
+            },
+            {
+              "id": "c2",
+              "name": "obsidianApiUrl",
+              "value": "https://obsidian.example.lan:27124",
+              "type": "string"
+            },
+            {
+              "id": "c3",
+              "name": "obsidianVault",
+              "value": "Personal",
+              "type": "string"
+            },
+            {
+              "id": "c4",
+              "name": "obsidianFolder",
+              "value": "Research",
+              "type": "string"
+            },
+            {
+              "id": "c5",
+              "name": "emailTo",
+              "value": "scott@scottmallinson.com",
+              "type": "string"
+            },
+            {
+              "id": "c6",
+              "name": "emailFrom",
+              "value": "n8n <n8n@scottmallinson.com>",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "b9d6f0a1-0004-4c1e-9a10-000000000004",
+      "name": "Research agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        480,
+        100
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.prompt }}",
+        "options": {
+          "systemMessage": "You are a research assistant with read-only access to the user's RSS/Atom feed reader through MCP tools.\n\nHow to work:\n1. If you need to know which feeds or boards exist, call list_feeds.\n2. Call search_feed_items to find candidate articles. Use keyword (web-search syntax, e.g. tiny LLM OR \"small language model\" -crypto), feed_name, board, status and since_days to narrow the results. Keep limit at 25 or less.\n3. Call get_full_article with an item_id for each article you rely on. Read at most 8 articles in full.\n4. Base every claim on the articles you retrieved. Never invent articles, quotes, numbers or URLs. If nothing relevant turns up, say so plainly.\n\nWrite the answer in Markdown for an Obsidian note:\n- The first line is a level-1 heading with a short, specific title (no date).\n- Then a short summary paragraph, then sections with level-2 headings.\n- Link each source inline as [headline](url), and finish with a \"## Sources\" list of every article you used, with its feed name.\n- Do not wrap the answer in a code block and do not add YAML front matter.",
+          "maxIterations": 20
+        }
+      }
+    },
+    {
+      "id": "b9d6f0a1-0005-4c1e-9a10-000000000005",
+      "name": "Gemma (Ollama)",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        400,
+        340
+      ],
+      "parameters": {
+        "model": "gemma4",
+        "options": {
+          "numCtx": 32768,
+          "temperature": 0.3,
+          "keepAlive": "10m"
+        }
+      }
+    },
+    {
+      "id": "b9d6f0a1-0006-4c1e-9a10-000000000006",
+      "name": "Feed reader MCP",
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.2,
+      "position": [
+        600,
+        340
+      ],
+      "parameters": {
+        "endpointUrl": "https://reader.scottmallinson.com/mcp",
+        "serverTransport": "httpStreamable",
+        "authentication": "bearerAuth",
+        "include": "selected",
+        "includeTools": [
+          "list_feeds",
+          "search_feed_items",
+          "get_full_article"
+        ],
+        "options": {
+          "timeout": 60000
+        }
+      }
+    },
+    {
+      "id": "b9d6f0a1-0007-4c1e-9a10-000000000007",
+      "name": "Build note",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        840,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Turns the agent's Markdown into an Obsidian note and an email body.\nconst cfg = $('Config').first().json;\nconst answer = String($json.output ?? '').trim();\nif (!answer) throw new Error('The AI Agent returned no output');\n\nconst heading = answer.match(/^#\\s+(.+)$/m);\nconst title = heading ? heading[1].trim() : 'Feed research';\n// Characters Obsidian refuses (or treats as link syntax) in file names.\nconst safeTitle = title.replace(/[\\\\/:*?\"<>|#^\\[\\]]/g, '').replace(/\\s+/g, ' ').trim().slice(0, 80) || 'Feed research';\nconst stamp = $now.toFormat('yyyy-MM-dd HHmm');\nconst notePath = `${cfg.obsidianFolder}/${stamp} ${safeTitle}.md`;\n\nconst quotedPrompt = String(cfg.prompt).split('\\n').map((line) => '> ' + line).join('\\n');\nconst content = [\n  '---',\n  `created: ${$now.toISO()}`,\n  'source: feed-reader',\n  'tags: [research, feed-reader]',\n  '---',\n  '',\n  answer,\n  '',\n  '> [!info]- Prompt',\n  quotedPrompt,\n  '',\n].join('\\n');\n\nconst obsidianLink = `obsidian://open?vault=${encodeURIComponent(cfg.obsidianVault)}&file=${encodeURIComponent(notePath)}`;\nconst emailMarkdown = `${answer}\\n\\n---\\n\\nSaved to Obsidian: [${cfg.obsidianVault}/${notePath}](${obsidianLink})\\n`;\n\nreturn [{\n  json: {\n    title,\n    notePath,\n    // The Local REST API takes the vault-relative path in the URL, one encoded segment at a time.\n    noteUrl: `${cfg.obsidianApiUrl.replace(/\\/+$/, '')}/vault/${notePath.split('/').map(encodeURIComponent).join('/')}`,\n    content,\n    emailMarkdown,\n    emailTo: cfg.emailTo,\n    emailFrom: cfg.emailFrom,\n  },\n}];"
+      }
+    },
+    {
+      "id": "b9d6f0a1-0008-4c1e-9a10-000000000008",
+      "name": "Save to Obsidian",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1080,
+        0
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $json.noteUrl }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "text/markdown",
+        "body": "={{ $json.content }}",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      }
+    },
+    {
+      "id": "b9d6f0a1-0009-4c1e-9a10-000000000009",
+      "name": "Markdown to HTML",
+      "type": "n8n-nodes-base.markdown",
+      "typeVersion": 1,
+      "position": [
+        1080,
+        200
+      ],
+      "parameters": {
+        "mode": "markdownToHtml",
+        "markdown": "={{ $json.emailMarkdown }}",
+        "destinationKey": "html",
+        "options": {
+          "tables": true,
+          "simpleLineBreaks": false,
+          "openLinksInNewWindow": true
+        }
+      }
+    },
+    {
+      "id": "b9d6f0a1-0010-4c1e-9a10-000000000010",
+      "name": "Email results",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1320,
+        200
+      ],
+      "parameters": {
+        "fromEmail": "={{ $('Build note').item.json.emailFrom }}",
+        "toEmail": "={{ $('Build note').item.json.emailTo }}",
+        "subject": "=Feed research: {{ $('Build note').item.json.title }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "b9d6f0a1-0011-4c1e-9a10-000000000011",
+      "name": "Sticky note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -300
+      ],
+      "parameters": {
+        "width": 620,
+        "height": 260,
+        "content": "## Setup\n1. **Config**: set `prompt` (TBD) and `obsidianApiUrl`.\n2. **Gemma (Ollama)**: Ollama credential pointing at the Ollama server; `ollama pull gemma4` there (Gemma 3 cannot call tools).\n3. **Feed reader MCP**: Bearer credential with the feed reader `API_TOKEN`.\n4. **Save to Obsidian**: Bearer credential with the Local REST API key from the Personal vault.\n5. **Email results**: SMTP credential.\n\nSee `n8n/README.md` in the feed-reader repo."
+      }
+    }
+  ],
+  "connections": {
+    "Every morning": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run manually": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Research agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemma (Ollama)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Research agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feed reader MCP": {
+      "ai_tool": [
+        [
+          {
+            "node": "Research agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Research agent": {
+      "main": [
+        [
+          {
+            "node": "Build note",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build note": {
+      "main": [
+        [
+          {
+            "node": "Save to Obsidian",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Markdown to HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Markdown to HTML": {
+      "main": [
+        [
+          {
+            "node": "Email results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
